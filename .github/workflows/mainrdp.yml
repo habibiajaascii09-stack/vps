@@ -1,31 +1,47 @@
-name: Setup RDP with Tailscale
+name: Setup VPS Gratis with Tailscale and Nginx
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # Trigger manual
 
 jobs:
-  setup-rdp:
-    runs-on: ubuntu-latest
+  setup-vps:
+    runs-on: ubuntu-latest  # Runner sebagai "VPS gratis" (ephemeral)
 
     steps:
-    - name: Install Tailscale
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Check Tailscale Auth Key
+      run: |
+        if [ -z "${{ secrets.TAILSCALE_AUTH_KEY }}" ]; then
+          echo "Error: TAILSCALE_AUTH_KEY not found in GitHub secrets."
+          exit 1
+        fi
+        echo "Tailscale Auth Key found. Proceeding..."
+
+    - name: Install Tailscale and Login
       run: |
         curl -fsSL https://tailscale.com/install.sh | sh
         sudo tailscale login --auth-key ${{ secrets.TAILSCALE_AUTH_KEY }}
         sudo tailscale up
         sleep 5
 
-    - name: Setup RDP
+    - name: Setup Nginx for Web Access
       run: |
         sudo apt update
-        sudo apt install -y xrdp xfce4 firefox
-        echo "ubuntu:password123" | sudo chpasswd
-        sudo systemctl start xrdp
+        sudo apt install -y nginx
+        # Buat simple web page (versi web VPS)
+        sudo bash -c 'echo "<html><body><h1>VPS Gratis via GitHub Actions</h1><p>Connected via Tailscale. IP: $(tailscale ip -4)</p></body></html>" > /var/www/html/index.html'
+        # Start nginx
+        sudo systemctl enable nginx
+        sudo systemctl start nginx
 
-    - name: Log RDP Details
+    - name: Log VPS Details
       run: |
-        RDP_IP=$(tailscale ip -4)
-        echo "RDP IP: $RDP_IP"
-        echo "User: ubuntu"
-        echo "Password: password123"
-        echo "Connect to $RDP_IP:3389, open Firefox for YouTube."
+        VPS_IP=$(tailscale ip -4)
+        VPS_PASSWORD="password123"  # Default password untuk user ubuntu (ganti jika perlu)
+        echo "## VPS Details" >> $GITHUB_STEP_SUMMARY
+        echo "- **VPS IP (Tailscale)**: $VPS_IP" >> $GITHUB_STEP_SUMMARY
+        echo "- **VPS Password**: $VPS_PASSWORD" >> $GITHUB_STEP_SUMMARY
+        echo "- **Web Access**: Buka http://$VPS_IP di browser (via Tailscale)." >> $GITHUB_STEP_SUMMARY
+        echo "VPS setup complete. IP: $VPS_IP, Password: $VPS_PASSWORD"
