@@ -1,13 +1,13 @@
 name: Setup RDP with Tailscale
 
 on:
-  workflow_dispatch:  # Manual trigger for safety
+  workflow_dispatch:  # Manual trigger untuk safety
   push:
-    branches: [ main ]  # Or your preferred branch
+    branches: [ main ]  # Atau branch pilihan Anda
 
 jobs:
   setup-rdp:
-    runs-on: ubuntu-latest  # Using Ubuntu runner for RDP setup
+    runs-on: ubuntu-latest  # Ubuntu runner untuk setup RDP
 
     steps:
     - name: Checkout repository
@@ -15,33 +15,60 @@ jobs:
 
     - name: Install Tailscale
       run: |
+        # Install Tailscale
         curl -fsSL https://tailscale.com/install.sh | sh
+        # Pastikan PATH termasuk Tailscale
+        export PATH=$PATH:/usr/local/bin:/usr/bin
+        # Up Tailscale dengan auth key dari secrets
         sudo tailscale up --auth-key ${{ secrets.TAILSCALE_AUTH_KEY }} --hostname github-rdp-runner
+        # Tunggu koneksi stabil
+        sleep 10
+        # Check status
+        if ! sudo tailscale status; then
+          echo "Error: Tailscale failed to connect. Check auth key or network."
+          exit 1
+        fi
 
     - name: Setup RDP Server
       run: |
         sudo apt update
-        sudo apt install -y xrdp xfce4 xfce4-goodies tightvncserver
+        sudo apt install -y xrdp xfce4 xfce4-goodies tightvncserver firefox  # Tambah Firefox untuk akses YouTube
+        # Set default user dan password RDP (ganti 'password123' untuk keamanan)
+        echo "ubuntu:password123" | sudo chpasswd
+        # Konfigurasi xrdp untuk XFCE
+        sudo sed -i 's/^test -x \/etc\/X11\/Xsession && exec \/etc\/X11\/Xsession/#test -x \/etc\/X11\/Xsession && exec \/etc\/X11\/Xsession/' /etc/xrdp/startwm.sh
+        sudo sed -i 's/^exec \/bin\/sh \/etc\/X11\/Xsession/#exec \/bin\/sh \/etc\/X11\/Xsession/' /etc/xrdp/startwm.sh
+        echo "xfce4-session" >> /etc/xrdp/startwm.sh
+        # Start RDP
         sudo systemctl enable xrdp
         sudo systemctl start xrdp
-        # Set a default password for RDP user (change as needed)
-        echo "ubuntu:password123" | sudo chpasswd
-        # Allow RDP through firewall if needed
+        # Allow RDP port via firewall (opsional, Tailscale handle VPN)
         sudo ufw allow 3389
+        # Check jika RDP running
+        if ! sudo systemctl is-active --quiet xrdp; then
+          echo "Error: RDP service failed to start."
+          exit 1
+        fi
 
-    - name: Get Tailscale IP
-      id: tailscale-ip
+    - name: Get Tailscale IP and Log Details
       run: |
-        TAILSCALE_IP=$(tailscale ip -4)
-        echo "RDP_IP=$TAILSCALE_IP" >> $GITHUB_ENV
-        echo "RDP User: ubuntu" >> $GITHUB_STEP_SUMMARY
-        echo "RDP Password: password123" >> $GITHUB_STEP_SUMMARY
-        echo "RDP IP: $TAILSCALE_IP" >> $GITHUB_STEP_SUMMARY
+        export PATH=$PATH:/usr/local/bin:/usr/bin
+        # Ambil IP Tailscale
+        RDP_IP=$(sudo tailscale ip -4)
+        if [ -z "$RDP_IP" ]; then
+          echo "Error: Failed to get Tailscale IP. Check Tailscale status."
+          exit 1
+        fi
+        echo "RDP_IP=$RDP_IP" >> $GITHUB_ENV
+        # Log ke summary dan output
+        echo "## RDP Details" >> $GITHUB_STEP_SUMMARY
+        echo "- **RDP IP**: $RDP_IP" >> $GITHUB_STEP_SUMMARY
+        echo "- **RDP User**: ubuntu" >> $GITHUB_STEP_SUMMARY
+        echo "- **RDP Password**: password123" >> $GITHUB_STEP_SUMMARY
+        echo "- **Instructions**: Connect via RDP client (e.g., Remmina or Windows RDP) to $RDP_IP:3389. Use XFCE desktop to open Firefox and access YouTube." >> $GITHUB_STEP_SUMMARY
+        echo "RDP setup complete. IP: $RDP_IP, User: ubuntu, Password: password123"
 
-    - name: Log RDP Details
+    - name: Keep Runner Alive (Optional)
       run: |
-        echo "RDP is now accessible via Tailscale."
-        echo "Connect using RDP client to IP: ${{ env.RDP_IP }}"
-        echo "Username: ubuntu"
-        echo "Password: password123"
-        echo "You can now open YouTube or other sites in the RDP session."
+        # Opsional: Jaga runner hidup selama 1 jam agar RDP bisa digunakan
+        sleep 3600
