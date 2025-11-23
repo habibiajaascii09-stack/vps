@@ -1,0 +1,78 @@
+name: Akses SSH & Web Tailscale - Uji Coba Terakhir (Max 6 Jam)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh_password:
+        description: 'Masukkan Password SSH/SUDO Anda (Wajib)'
+        required: true
+        default: 'Rahasia123'
+        
+jobs:
+  ssh-access:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 1. Instalasi Nginx dan SSH Server
+      - name: Install Nginx and SSH Server
+        run: |
+          sudo apt update
+          sudo apt install -y nginx openssh-server
+
+      # 2. AKTIVASI ROOT & USER RUNNER (Metode Paling Agresif)
+      - name: Activate Root and Set Password for Runner
+        run: |
+          # Aktifkan login root (MUNGKIN DIBUTUHKAN)
+          sudo passwd -u root
+          echo "root:${{ github.event.inputs.ssh_password }}" | sudo chpasswd
+          
+          # Set password untuk user 'runner' (USER DEFAULT)
+          echo "runner:${{ github.event.inputs.ssh_password }}" | sudo chpasswd
+
+          # Tambahkan user 'runner' ke grup sudo agar bisa menjalankan perintah root
+          sudo usermod -aG sudo runner
+
+      # 3. Konfigurasi SSH (Izinkan Login Password)
+      - name: Configure SSH to Allow Password Login
+        run: |
+          # Ubah file konfigurasi SSH
+          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/#ClientAliveInterval 0/ClientAliveInterval 300/' /etc/ssh/sshd_config
+          sudo sed -i 's/#ClientAliveCountMax 3/ClientAliveCountMax 2/' /etc/ssh/sshd_config
+
+          # Restart layanan SSH untuk menerapkan perubahan
+          sudo service ssh restart
+
+      # 4. Start Tailscale
+      - name: Start Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TS_AUTH_KEY }}
+          hostname: final-access-${{ github.run_id }}
+          
+      # 5. Start Nginx & Dapatkan IP
+      - name: Start Nginx and Get IP
+        run: |
+          sudo service nginx start
+          ip_address=$(tailscale ip -4)
+          
+          # --- OUTPUT IP & PASSWORD KE SUMMARY LOG ---
+          echo "### ✅ AKSES TELAH SIAP (MAX 6 JAM) " >> $GITHUB_STEP_SUMMARY
+          echo "🌐 **ALAMAT WEB (NGINX):** http://${ip_address}" >> $GITHUB_STEP_SUMMARY
+          echo "💻 **AKSES SSH (JuiceSSH):** \`${ip_address}\`" >> $GITHUB_STEP_SUMMARY
+          echo "🔑 **USER:** \`runner\` atau \`root\`" >> $GITHUB_STEP_SUMMARY
+          echo "🔓 **PASSWORD:** **${{ github.event.inputs.ssh_password }}** (yang Anda masukkan di input)" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "Pastikan Tailscale di HP Anda AKTIF. Akses web akan menampilkan halaman 'Welcome to Nginx'." >> $GITHUB_STEP_SUMMARY
+          echo "RUNNER_IP=${ip_address}" >> $GITHUB_ENV
+
+      # 6. Tahan Job
+      - name: Hold Job and Wait for Timeout
+        run: |
+          echo "Runner berjalan di IP: ${{ env.RUNNER_IP }}"
+          sleep 350m
