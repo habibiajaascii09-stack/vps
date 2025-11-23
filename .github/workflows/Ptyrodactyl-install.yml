@@ -1,0 +1,65 @@
+name: Pterodactyl Install on GitHub Runner (Max 6 Hours)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  pterodactyl-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 1. Setup Tailscale & Akses SSH (Wajib)
+      - name: Set Up Tailscale & SSH
+        run: |
+          # Instal SSH Server
+          sudo apt update
+          sudo apt install -y openssh-server
+          # Set password untuk user 'runner' (Metode yang paling mungkin berhasil)
+          echo -e "${{ secrets.APP_PASSWORD }}\n${{ secrets.APP_PASSWORD }}" | sudo passwd runner || true
+          
+      - name: Start Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TS_AUTH_KEY }}
+          hostname: ptero-runner-${{ github.run_id }}
+
+      # 2. Skrip Instalasi Otomatis Pterodactyl (Sangat Cepat)
+      - name: Run Automatic Pterodactyl Installation Script
+        env:
+          # Variabel yang digunakan oleh skrip instalasi
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          FQDN: ${{ secrets.FQDN }}
+          
+        run: |
+          # Download skrip instalasi Pterodactyl otomatis 
+          # (Contoh: Skrip yang menginstal Panel, Wings, Docker, Nginx)
+          wget -qO install.sh https://raw.githubusercontent.com/pterodactyl/installation-script/master/install.sh
+          chmod +x install.sh
+          
+          # Jalankan skrip instalasi (Proses ini akan memakan waktu 1-3 jam)
+          sudo ./install.sh --panel --wings --db-password $DB_PASSWORD --app-password $APP_PASSWORD --admin-email $ADMIN_EMAIL --fqdn $FQDN
+
+      # 3. Dapatkan IP dan Instruksi Login
+      - name: Get Connection Information
+        run: |
+          ip_address=$(tailscale ip -4)
+          echo "### ⚠️ AKSES PANEL ANDA (MAX 6 JAM)" >> $GITHUB_STEP_SUMMARY
+          echo "🌐 **ALAMAT WEB:** http://${ip_address}" >> $GITHUB_STEP_SUMMARY
+          echo "💻 **AKSES SSH:** ssh runner@${ip_address}" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "Panel Anda kemungkinan sudah terinstal di IP tersebut. Log in dengan email ${{ secrets.ADMIN_EMAIL }}." >> $GITHUB_STEP_SUMMARY
+          echo "RUNNER_IP=${ip_address}" >> $GITHUB_ENV
+
+      # 4. Tahan Job dan Tunggu Timeout
+      - name: Hold Job and Wait for Timeout
+        run: |
+          echo "Pterodactyl Running di IP: ${{ env.RUNNER_IP }}"
+          echo "Anda punya waktu sisa sekitar 1-3 jam."
+          sleep 350m
+          
