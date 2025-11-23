@@ -1,4 +1,4 @@
-name: Pterodactyl Panel (Final - Semua Bug Fix)
+name: Pterodactyl Panel (Perbaikan Bug APT V2)
 
 on:
   workflow_dispatch:
@@ -24,34 +24,48 @@ jobs:
       - name: Checkout Kode
         uses: actions/checkout@v4
 
-      - name: Instal Prasyarat, SSH, dan Hapus Konflik Paket (Anti-Bug)
+      # --- PERBAIKAN BUG UTAMA ADA DI SINI ---
+      - name: Instal Prasyarat, SSH, dan Hapus Konflik Paket (BUG FIX V2)
         env:
           SSH_PASS: ${{ github.event.inputs.ssh_password }}
         run: |
           echo "Memperbarui sistem & menginstal prasyarat..."
           sudo apt update -y
           
-          # --- LANGKAH WAJIB: PEMBERSIHAN DAN PERBAIKAN PAKET KRUSIAL ---
-          echo "Memperbaiki Konflik dan Menghapus containerd yang konflik..."
+          # 1. PEMBERSIHAN PAKET BERMASALAH (Lebih Agresif)
+          echo "--- MEMULAI PEMBERSIHAN PAKET KRITIS ---"
+          
+          # Hapus containerd/docker yang mungkin ada dari image runner
+          sudo apt-get remove -y containerd docker.io docker-doc docker-compose docker-compose-v2 podman-docker runc || true
+          sudo apt-get purge -y containerd docker.io docker-doc docker-compose docker-compose-v2 podman-docker runc || true
+          
+          # Hapus semua paket yang ditahan/konflik
+          sudo apt-mark unhold containerd || true
+          sudo apt-mark unhold docker.io || true
+          
+          # Perbaiki sistem yang rusak/gagal konfigurasi
+          sudo dpkg --configure -a || true
+          sudo apt install -f -y || true 
+          sudo apt autoremove -y 
           sudo apt clean
-          sudo apt autoremove -y
-          sudo dpkg --configure -a
-          sudo apt install -f -y 
+
+          echo "--- PEMBERSIHAN SELESAI. INSTALASI LANJUT ---"
           
-          # Hapus containerd yang bentrok sebelum instalasi Tailscale/Docker
-          sudo apt-get remove -y containerd || true
-          sudo apt-get purge -y containerd || true
-          
-          # --- Instalasi Prasyarat Utama (SSH, Nginx, Docker) ---
+          # 2. Instalasi Prasyarat Utama (SSH, Nginx, Docker)
           echo "Menginstal SSH Server, Nginx, dan Docker..."
-          sudo apt install -y openssh-server nginx net-tools curl sshpass docker.io
+          # Instalasi Docker resmi (bukan docker.io dari repo Ubuntu) untuk kestabilan
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sudo sh get-docker.sh
+          
+          # Instalasi SSH Server dan Nginx
+          sudo apt install -y openssh-server nginx net-tools curl sshpass
           
           # Pengaturan User dan Service SSH
           echo "runner:${{ env.SSH_PASS }}" | sudo chpasswd
           sudo systemctl start ssh
           sudo systemctl enable ssh
           
-          echo "Prasyarat siap, konflik paket diatasi."
+          echo "Prasyarat (Termasuk Docker Stabil) siap."
 
       - name: Hubungkan ke Tailscale & Dapatkan IP
         id: ts_setup
@@ -65,7 +79,7 @@ jobs:
           echo "Menginstal dan menghubungkan Tailscale..."
           curl -fsSL https://tailscale.com/install.sh | sh
           
-          # Menghubungkan menggunakan Auth Key
+          # Menghubungkan menggunakan Auth Key (TERBUKTI BERHASIL)
           sudo tailscale up --authkey "${{ env.TS_SECRET }}" --ssh || true
 
           # Mencari IP Tailscale (IPv4)
@@ -110,6 +124,7 @@ jobs:
           PANEL_PATH="/var/www/pterodactyl"
           cd $PANEL_PATH
           
+          # Menggunakan '|| true' untuk memastikan skrip tetap berjalan meskipun ada error minor
           php artisan p:user:make \
             --email="${{ env.ADMIN_EMAIL }}" \
             --name="AdminPanel" \
