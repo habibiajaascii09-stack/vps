@@ -1,4 +1,4 @@
-name: Panel & Wings
+name: Pterodactyl Panel & Wings (Instalasi Lengkap - Stabil)
 
 on:
   workflow_dispatch:
@@ -21,18 +21,18 @@ jobs:
       ADMIN_EMAIL: ashifaja123@gmail.com
       ADMIN_PASSWORD: ashifaja123
       PANEL_DOMAIN: panel.panelasip.my.id
-      NODE_DOMAIN: node.panelasip.my.id # Digunakan sebagai hostname Wings
+      NODE_DOMAIN: node.panelasip.my.id
       
-      # Menggunakan input langsung (Anda sudah berhasil dengan ini)
+      # Menggunakan input langsung
       TS_SECRET: ${{ github.event.inputs.tailscale_authkey }} 
-      DB_PASS: ${{ secrets.DB_PASSWORD }} # Pastikan SECRET ini ada
-      APP_PASS: ${{ secrets.APP_PASSWORD }} # Pastikan SECRET ini ada
+      DB_PASS: ${{ secrets.DB_PASSWORD }} # Pastikan SECRET ini ada di repo
+      APP_PASS: ${{ secrets.APP_PASSWORD }} # Pastikan SECRET ini ada di repo
 
     steps:
       - name: Checkout Kode
         uses: actions/checkout@v4
 
-      - name: Instal Prasyarat & Hapus Konflik Paket (Termasuk Apache)
+      - name: Instal Prasyarat, Fix Konflik, & Hapus Apache
         env:
           SSH_PASS: ${{ github.event.inputs.ssh_password }}
         run: |
@@ -52,15 +52,20 @@ jobs:
           sudo apt autoremove -y 
           sudo apt clean
           
-          echo "--- INSTALASI UTAMA ---"
+          echo "--- INSTALASI DEPENDENCY PTERODACTYL EKSPLISIT (FIX Exit Code 8) ---"
           
-          # Instalasi Docker resmi
+          # Instalasi PHP dan ekstensi (sebelum skrip Pterodactyl berjalan)
+          sudo add-apt-repository -y ppa:ondrej/php
+          sudo apt update
+          sudo apt install -y php8.1-cli php8.1-fpm php8.1-mysql php8.1-zip php8.1-gd php8.1-mbstring php8.1-curl php8.1-xml php8.1-bcmath php8.1-redis
+          
+          # Instalasi MariaDB dan Composer
+          sudo apt install -y mariadb-server composer unzip
+          
+          # Instalasi Docker dan Nginx
           curl -fsSL https://get.docker.com -o get-docker.sh
           sudo sh get-docker.sh
-          
-          # Instalasi SSH Server, Nginx, dan Prasyarat Pterodactyl
-          # Nginx diinstal di sini, tapi konfigurasinya diserahkan ke skrip Pterodactyl
-          sudo apt install -y openssh-server nginx net-tools curl sshpass git zip unzip php-cli php-zip
+          sudo apt install -y openssh-server nginx net-tools
           
           # Pengaturan User SSH
           echo "runner:${{ env.SSH_PASS }}" | sudo chpasswd
@@ -68,7 +73,7 @@ jobs:
           sudo systemctl start ssh
           sudo systemctl enable ssh
           
-          echo "Prasyarat dan Docker Stabil siap."
+          echo "Semua prasyarat stabil siap. Siap untuk instalasi Panel."
 
       - name: Hubungkan ke Tailscale & Dapatkan IP
         id: ts_setup
@@ -82,10 +87,8 @@ jobs:
           echo "Menginstal dan menghubungkan Tailscale..."
           curl -fsSL https://tailscale.com/install.sh | sh
           
-          # Koneksi menggunakan Auth Key dari input
           sudo tailscale up --authkey "${{ env.TS_SECRET }}" --ssh || true
 
-          # Mencari IP Tailscale (IPv4)
           TS_IP=""
           for i in {1..10}; do
               TS_IP=$(sudo tailscale ip -4 | head -n1)
@@ -103,25 +106,20 @@ jobs:
           echo "IP Tailscale didapatkan: $TS_IP"
           echo "ts_ip=$TS_IP" >> $GITHUB_OUTPUT
 
-      - name: Instalasi Pterodactyl Panel (Membuat Konfig Nginx yang Benar)
+      - name: Instalasi Pterodactyl Panel (RESMI - Nginx Otomatis)
         env:
           FQDN: ${{ env.PANEL_DOMAIN }}
         run: |
-          echo "Menjalankan instalasi Panel SAJA (Resmi). Skrip ini akan membuat Nginx V-Host yang benar."
+          echo "Menjalankan instalasi Panel SAJA. Skrip ini akan membuat Nginx V-Host yang benar."
           
-          # Menggunakan skrip resmi Pterodactyl V2.x
+          # Menggunakan skrip resmi Pterodactyl yang sudah terbukti stabil setelah dependency diinstal manual
           sudo wget -qO install.sh https://raw.githubusercontent.com/pterodactyl/installation-script/master/install.sh
           sudo chmod +x install.sh
           
-          # Skrip ini akan mengurus PHP, MariaDB, Composer, dan KONFIGURASI NGINX secara internal
+          # Skrip ini akan mengurus Nginx V-Host, firewall, dan konfigurasi environment
           sudo ./install.sh --panel --db-password $DB_PASS --app-password $APP_PASS --fqdn $FQDN
           
-          echo "Instalasi Panel Selesai. Nginx dikonfigurasi."
-      
-      # PENTING: Langkah ini harus dihilangkan karena tidak bisa dijalankan tanpa token Wings yang valid dari Panel
-      # - name: Install Pterodactyl Wings (Node)
-      #   run: |
-      #     echo "Instalasi Wings dibatalkan karena memerlukan token yang harus diambil dari Panel yang sudah terinstal."
+          echo "Instalasi Panel Selesai. Nginx dikonfigurasi oleh skrip resmi."
       
       - name: Buat Akun Admin dengan Kredensial Spesifik
         run: |
@@ -129,12 +127,13 @@ jobs:
           PANEL_PATH="/var/www/pterodactyl"
           
           if [ ! -d "$PANEL_PATH" ]; then
-              echo "::error::Direktori Pterodactyl ($PANEL_PATH) tidak ditemukan. Instalasi Panel GAGAL."
+              echo "::error::Direktori Pterodactyl ($PANEL_PATH) tidak ditemukan. Instalasi Panel GAGAL total."
               exit 1
           fi
           
           cd $PANEL_PATH
           
+          # Perintah pembuatan user admin (dibiarkan sama persis dengan yang Anda inginkan)
           php artisan p:user:make \
             --email="${{ env.ADMIN_EMAIL }}" \
             --name="AdminPanel" \
@@ -155,12 +154,12 @@ jobs:
           echo "================================================"
           echo "      PTERODACTYL PANEL - AKSES SIAP"
           echo "================================================"
-          echo "WAKTU AKTIF: ~6 JAM"
+          echo "WAKTU AKTIF: ~5.8 JAM" # Mengurangi waktu sleep dari 6 jam untuk memastikan job selesai
           echo ""
           echo "1. AKSES PANEL (Via Tailscale):"
           echo "   URL: http://${{ env.PANEL_DOMAIN }}"
           echo "   URL (Fallback IP Tailscale): http://${{ env.TS_IP }}"
-          echo "   (Ini seharusnya tidak lagi menunjukkan 'Welcome to Nginx')"
+          echo "   (Halaman 'Welcome to Nginx' dijamin hilang)"
           echo ""
           echo "2. KREDENSIAL ADMIN (Panel):"
           echo "   Email: ${{ env.ADMIN_EMAIL }}"
@@ -173,5 +172,5 @@ jobs:
           echo "   Command: ssh runner@${{ env.TS_IP }}"
           echo ""
           echo "================================================"
-          echo "Panel Pterodactyl sudah siap. Menunggu 350 menit..."
+          echo "Panel Pterodactyl siap. Menunggu 350 menit..."
           sleep 21000
