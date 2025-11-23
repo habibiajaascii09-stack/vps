@@ -19,10 +19,12 @@ jobs:
         curl -fsSL https://tailscale.com/install.sh | sh
         # Pastikan PATH termasuk Tailscale
         export PATH=$PATH:/usr/local/bin:/usr/bin
-        # Up Tailscale dengan auth key dari secrets
-        sudo tailscale up --auth-key ${{ secrets.TAILSCALE_AUTH_KEY }} --hostname github-rdp-runner
+        # Up Tailscale dengan auth key dari secrets (tanpa --hostname, karena tidak didukung di up)
+        sudo tailscale up --auth-key ${{ secrets.TAILSCALE_AUTH_KEY }}
         # Tunggu koneksi stabil
         sleep 10
+        # Set hostname setelah up
+        sudo tailscale set --hostname github-rdp-runner
         # Check status
         if ! sudo tailscale status; then
           echo "Error: Tailscale failed to connect. Check auth key or network."
