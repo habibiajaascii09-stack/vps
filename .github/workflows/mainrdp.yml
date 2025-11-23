@@ -56,13 +56,16 @@ jobs:
           sudo rm -f /etc/nginx/sites-enabled/default
           sudo rm -f /var/www/html/index.nginx-debian.html
 
-      - name: Configure Nginx Default Server Block to Proxy to Panel
+      - name: Configure Nginx Default Server Block to Serve Info Page or Proxy to Panel
         run: |
           sudo tee /etc/nginx/sites-available/default > /dev/null <<EOF
           server {
               listen 80 default_server;
               server_name _;
               location / {
+                  try_files /var/www/html/index.html @proxy_panel;
+              }
+              location @proxy_panel {
                   proxy_pass http://localhost:8080;
                   proxy_set_header Host \$host;
                   proxy_set_header X-Real-IP \$remote_addr;
@@ -128,23 +131,35 @@ jobs:
         run: |
           curl -sSL https://pterodactyl-installer.sebastian-lehrbach.de/ | sudo bash -s -- --wings-only --panel-url https://panel.panelasip.my.id --token YOUR_WINGS_TOKEN --hostname node.panel.my.id --port 8081
 
-      - name: Verify and Restart Services
+      - name: Verify and Start Services Manually if Needed
         run: |
           # Check if panel is running on port 8080
           if sudo netstat -tlnp | grep -q :8080; then
             echo "Panel is running on port 8080"
           else
-            echo "Panel not running, attempting to start..."
-            sudo systemctl start pterodactyl-panel || echo "Failed to start panel"
+            echo "Panel not running, attempting to start manually..."
+            # Assuming panel is installed in /var/www/pterodactyl or similar
+            cd /var/www/pterodactyl || cd /srv/pterodactyl || echo "Panel directory not found"
+            if [ -f artisan ]; then
+              sudo php artisan serve --host=0.0.0.0 --port=8080 &
+              echo "Started panel manually on port 8080"
+            else
+              echo "Artisan file not found, panel may not be installed correctly"
+            fi
           fi
           # Check if wings is running on port 8081
           if sudo netstat -tlnp | grep -q :8081; then
             echo "Wings is running on port 8081"
           else
             echo "Wings not running, attempting to start..."
-            sudo systemctl start wings || echo "Failed to start wings"
+            sudo systemctl start wings || echo "Failed to start wings via systemctl"
+            # If systemctl fails, try manual start if wings binary exists
+            if ! sudo netstat -tlnp | grep -q :8081; then
+              sudo /usr/local/bin/wings --config /etc/pterodactyl/config.yml &
+              echo "Started wings manually"
+            fi
           fi
-          # Restart Nginx to ensure proxy is working
+          # Restart Nginx
           sudo systemctl restart nginx
 
       - name: Create Info Page for Website
@@ -171,7 +186,9 @@ jobs:
               <pre>$(sudo systemctl status wings --no-pager -l 2>/dev/null || echo "Wings service not found")</pre>
               <pre>$(sudo systemctl status nginx --no-pager -l 2>/dev/null || echo "Nginx service not found")</pre>
               <h2>Running Processes:</h2>
-              <pre>$(ps aux | grep -E "(pterodactyl|wings|nginx)" | head -20)</pre>
+              <pre>$(ps aux | grep -E "(pterodactyl|wings|nginx|php)" | head -20)</pre>
+              <h2>Ports in Use:</h2>
+              <pre>$(sudo netstat -tlnp | grep -E ":(80|8080|8081) ")</pre>
           </body>
           </html>
           EOF
