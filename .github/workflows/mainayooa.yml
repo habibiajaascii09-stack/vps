@@ -1,0 +1,97 @@
+name: Akses SSH Sederhana (Hanya Tailscale)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh_password:
+        description: 'Masukkan Password SSH/SUDO (Wajib)'
+        required: true
+        default: 'P@sswordAman123'
+      tailscale_authkey_needed:
+        description: 'Pastikan Secret TAILSCALE_AUTHKEY sudah diset di repo'
+        required: false
+
+jobs:
+  simple_access:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 
+
+    env:
+      # Mengambil Secret TAILSCALE_AUTHKEY yang sudah dikonfirmasi user
+      TS_SECRET: ${{ secrets.TAILSCALE_AUTHKEY }} 
+      SSH_PASS: ${{ github.event.inputs.ssh_password }}
+
+    steps:
+      - name: Checkout Kode
+        uses: actions/checkout@v4
+
+      - name: Cek Secret Tailscale dan Instalasi Awal
+        run: |
+          set -e
+          # 1. Cek Secret TAILSCALE_AUTHKEY
+          if [ -z "${{ env.TS_SECRET }}" ]; then 
+            echo "::error::Secret TAILSCALE_AUTHKEY (TS_SECRET) tidak diset. Proses gagal."
+            exit 1
+          fi
+          
+          # 2. Instalasi SSH Server dan Prasyarat
+          echo "Menginstal SSH Server, Nginx (hanya untuk tes web), dan Tailscale..."
+          sudo apt update -y
+          sudo apt install -y openssh-server nginx net-tools curl sshpass
+          
+          # 3. Set password untuk user 'runner'
+          echo "runner:${{ env.SSH_PASS }}" | sudo chpasswd
+          sudo systemctl start ssh
+          sudo systemctl enable ssh
+          
+          echo "SSH dan Nginx telah diinstal."
+
+      - name: Hubungkan ke Tailscale & Dapatkan IP
+        id: ts_setup
+        run: |
+          echo "Menginstal dan menghubungkan Tailscale..."
+          curl -fsSL https://tailscale.com/install.sh | sh
+          
+          # Menghubungkan menggunakan Auth Key dari Secret
+          sudo tailscale up --authkey "${{ env.TS_SECRET }}" --ssh || true
+
+          # Mencari IP Tailscale (IPv4)
+          TS_IP=""
+          for i in {1..10}; do
+              TS_IP=$(sudo tailscale ip -4 | head -n1)
+              if [ -n "$TS_IP" ]; then
+                  break
+              fi
+              sleep 2
+          done
+          
+          if [ -z "$TS_IP" ]; then
+              echo "::error::Gagal mendapatkan IP Tailscale. Proses gagal."
+              exit 1
+          fi
+
+          echo "IP Tailscale didapatkan: $TS_IP"
+          echo "ts_ip=$TS_IP" >> $GITHUB_OUTPUT
+
+      - name: Final Output & Tahan Pekerjaan (6 Jam)
+        run: |
+          TS_IP="${{ steps.ts_setup.outputs.ts_ip }}"
+          
+          echo "================================================"
+          echo "      AKSES VPS SEDERHANA - SIAP"
+          echo "================================================"
+          echo "WAKTU AKTIF: ~6 JAM"
+          echo ""
+          echo "1. AKSES SSH (Via Tailscale):"
+          echo "   IP: $TS_IP"
+          echo "   Username: runner"
+          echo "   Password: ${{ env.SSH_PASS }}"
+          echo "   Command: ssh runner@$TS_IP"
+          echo ""
+          echo "2. AKSES WEB (Nginx Halaman Default):"
+          echo "   URL: http://$TS_IP"
+          echo ""
+          echo "================================================"
+          echo "VPS sudah siap dan terhubung ke Tailscale."
+          echo "Menunggu 350 menit..."
+          sleep 21000
