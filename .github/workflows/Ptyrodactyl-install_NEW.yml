@@ -1,0 +1,81 @@
+name: Pterodactyl Install - Anti Error Steps (Max 6 Jam)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  pterodactyl-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 1. Setup Tailscale & Akses SSH
+      - name: Set Up Tailscale & SSH
+        run: |
+          sudo apt update
+          sudo apt install -y openssh-server
+          # Set password untuk user 'runner'
+          echo -e "${{ secrets.APP_PASSWORD }}\n${{ secrets.APP_PASSWORD }}" | sudo passwd runner || true
+          
+      - name: Start Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TS_AUTH_KEY }}
+          hostname: ptero-runner-${{ github.run_id }}
+
+      # 2. Instalasi Dasar (Wajib sebelum Pterodactyl)
+      - name: Install Base Dependencies (Docker, Nginx, MariaDB)
+        run: |
+          # Instal Docker (Wajib untuk Wings)
+          sudo apt-get install -y ca-certificates curl gnupg lsb-release
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+            $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+          # Instalasi MariaDB dan Nginx
+          sudo apt install -y mariadb-server nginx php8.1-cli php8.1-curl php8.1-gd php8.1-mysql php8.1-zip php8.1-mbstring php8.1-xml php8.1-bcmath php8.1-json php8.1-dev
+
+      # 3. Download Skrip Instalasi Pterodactyl
+      - name: Download Pterodactyl Script
+        run: |
+          wget -qO install.sh https://raw.githubusercontent.com/pterodactyl/installation-script/master/install.sh
+          chmod +x install.sh
+
+      # 4. Instalasi Pterodactyl Panel dan Wings (Menggunakan Skrip Bertahap)
+      - name: Run Panel and Wings Installation
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          FQDN: ${{ secrets.FQDN }}
+          
+        run: |
+          # Instal PANEL dan buat DB
+          sudo ./install.sh --panel --db-password $DB_PASSWORD --app-password $APP_PASSWORD --admin-email $ADMIN_EMAIL --fqdn $FQDN --no-wings
+          
+          # Instal WINGS secara terpisah (lebih stabil)
+          sudo ./install.sh --wings --no-panel
+
+      # 5. Dapatkan IP dan Instruksi Login
+      - name: Get Connection Information
+        run: |
+          ip_address=$(tailscale ip -4)
+          echo "### ✅ AKSES PANEL ANDA TELAH SIAP (MAX 6 JAM)" >> $GITHUB_STEP_SUMMARY
+          echo "🌐 **ALAMAT WEB:** http://${ip_address}" >> $GITHUB_STEP_SUMMARY
+          echo "💻 **USER NAME:** \`runner\`" >> $GITHUB_STEP_SUMMARY
+          echo "🔑 **PASSWORD:** Gunakan Secret \`APP_PASSWORD\` Anda." >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "Log in ke Panel dengan Email: ${{ secrets.ADMIN_EMAIL }} dan App Password Anda." >> $GITHUB_STEP_SUMMARY
+          echo "RUNNER_IP=${ip_address}" >> $GITHUB_ENV
+
+      # 6. Tahan Job
+      - name: Hold Job and Wait for Timeout
+        run: |
+          echo "Pterodactyl Running di IP: ${{ env.RUNNER_IP }}"
+          sleep 350m
