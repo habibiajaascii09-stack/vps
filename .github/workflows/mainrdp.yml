@@ -147,8 +147,8 @@ jobs:
           sudo docker-compose up -d
           # Wait for panel to start
           sleep 60
-          # Create admin user
-          sudo docker-compose exec panel php artisan p:user:make --email=ashifaja123@gmail.com --password=ashifaja123 --admin=1
+          # Create admin user (with -T to avoid TTY error)
+          sudo docker-compose exec -T panel php artisan p:user:make --email=ashifaja123@gmail.com --password=ashifaja123 --admin=1
 
       - name: Setup Pterodactyl Wings via Docker Compose
         run: |
