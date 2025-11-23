@@ -95,3 +95,8 @@ jobs:
           echo "VPS Password: (Default Ubuntu runner, no password set)"
           echo "Akun Panel: ashifaja123@gmail.com"
           echo "Password Panel: ashifaja123"
+
+      - name: Keep Runner Running for 6 Hours
+        run: |
+          echo "Runner akan berjalan terus selama 6 jam..."
+          sleep 21600  # 6 jam dalam detik
