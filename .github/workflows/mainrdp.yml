@@ -1,47 +1,97 @@
-name: Setup VPS Gratis with Tailscale and Nginx
+name: VPS and Setup Panel
 
 on:
-  workflow_dispatch:  # Trigger manual
+  workflow_dispatch:
+    inputs:
+      tailscale_authkey:
+        description: 'Tailscale Auth Key'
+        required: true
+        default: 'tskey-auth-~~~~~~~'
 
 jobs:
-  setup-vps:
-    runs-on: ubuntu-latest  # Runner sebagai "VPS gratis" (ephemeral)
-
+  setup:
+    runs-on: ubuntu-latest
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-    - name: Check Tailscale Auth Key
-      run: |
-        if [ -z "${{ secrets.TAILSCALE_AUTH_KEY }}" ]; then
-          echo "Error: TAILSCALE_AUTH_KEY not found in GitHub secrets."
-          exit 1
-        fi
-        echo "Tailscale Auth Key found. Proceeding..."
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey ${{ inputs.tailscale_authkey }} --hostname github-runner
 
-    - name: Install Tailscale and Login
-      run: |
-        curl -fsSL https://tailscale.com/install.sh | sh
-        sudo tailscale login --auth-key ${{ secrets.TAILSCALE_AUTH_KEY }}
-        sudo tailscale up
-        sleep 5
+      - name: Get Tailscale IP
+        id: tailscale_ip
+        run: |
+          echo "TAILSCALE_IP=$(tailscale ip -4)" >> $GITHUB_ENV
 
-    - name: Setup Nginx for Web Access
-      run: |
-        sudo apt update
-        sudo apt install -y nginx
-        # Buat simple web page (versi web VPS)
-        sudo bash -c 'echo "<html><body><h1>VPS Gratis via GitHub Actions</h1><p>Connected via Tailscale. IP: $(tailscale ip -4)</p></body></html>" > /var/www/html/index.html'
-        # Start nginx
-        sudo systemctl enable nginx
-        sudo systemctl start nginx
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y curl wget gnupg2 software-properties-common
 
-    - name: Log VPS Details
-      run: |
-        VPS_IP=$(tailscale ip -4)
-        VPS_PASSWORD="password123"  # Default password untuk user ubuntu (ganti jika perlu)
-        echo "## VPS Details" >> $GITHUB_STEP_SUMMARY
-        echo "- **VPS IP (Tailscale)**: $VPS_IP" >> $GITHUB_STEP_SUMMARY
-        echo "- **VPS Password**: $VPS_PASSWORD" >> $GITHUB_STEP_SUMMARY
-        echo "- **Web Access**: Buka http://$VPS_IP di browser (via Tailscale)." >> $GITHUB_STEP_SUMMARY
-        echo "VPS setup complete. IP: $VPS_IP, Password: $VPS_PASSWORD"
+      - name: Install Nginx
+        run: |
+          sudo apt install -y nginx
+          sudo systemctl start nginx
+          sudo systemctl enable nginx
+
+      - name: Configure Nginx for Pterodactyl Panel
+        run: |
+          sudo tee /etc/nginx/sites-available/panel.panelasip.my.id > /dev/null <<EOF
+          server {
+              listen 80;
+              server_name panel.panelasip.my.id;
+              location / {
+                  proxy_pass http://localhost:8080;
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto \$scheme;
+              }
+          }
+          EOF
+          sudo ln -s /etc/nginx/sites-available/panel.panelasip.my.id /etc/nginx/sites-enabled/
+          sudo nginx -t
+          sudo systemctl reload nginx
+
+      - name: Configure Nginx for Pterodactyl Node
+        run: |
+          sudo tee /etc/nginx/sites-available/node.panel.my.id > /dev/null <<EOF
+          server {
+              listen 80;
+              server_name node.panel.my.id;
+              location / {
+                  proxy_pass http://localhost:8081;
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto \$scheme;
+              }
+          }
+          EOF
+          sudo ln -s /etc/nginx/sites-available/node.panel.my.id /etc/nginx/sites-enabled/
+          sudo nginx -t
+          sudo systemctl reload nginx
+
+      - name: Install Docker (for Pterodactyl)
+        run: |
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sudo sh get-docker.sh
+          sudo systemctl start docker
+          sudo systemctl enable docker
+
+      - name: Install Pterodactyl Panel
+        run: |
+          curl -sSL https://pterodactyl-installer.sebastian-lehrbach.de/ | sudo bash -s -- --panel-only --email ashifaja123@gmail.com --password ashifaja123 --hostname panel.panelasip.my.id --port 8080
+
+      - name: Install Pterodactyl Wings (Node)
+        run: |
+          curl -sSL https://pterodactyl-installer.sebastian-lehrbach.de/ | sudo bash -s -- --wings-only --panel-url https://panel.panelasip.my.id --token YOUR_WINGS_TOKEN --hostname node.panel.my.id --port 8081
+
+      - name: Output Information
+        run: |
+          echo "IP VPS: ${{ env.TAILSCALE_IP }}"
+          echo "VPS Password: (Default Ubuntu runner, no password set)"
+          echo "Akun Panel: ashifaja123@gmail.com"
+          echo "Password Panel: ashifaja123"
