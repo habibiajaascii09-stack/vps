@@ -1,0 +1,47 @@
+name: Setup RDP with Tailscale
+
+on:
+  workflow_dispatch:  # Manual trigger for safety
+  push:
+    branches: [ main ]  # Or your preferred branch
+
+jobs:
+  setup-rdp:
+    runs-on: ubuntu-latest  # Using Ubuntu runner for RDP setup
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Tailscale
+      run: |
+        curl -fsSL https://tailscale.com/install.sh | sh
+        sudo tailscale up --auth-key ${{ secrets.TAILSCALE_AUTH_KEY }} --hostname github-rdp-runner
+
+    - name: Setup RDP Server
+      run: |
+        sudo apt update
+        sudo apt install -y xrdp xfce4 xfce4-goodies tightvncserver
+        sudo systemctl enable xrdp
+        sudo systemctl start xrdp
+        # Set a default password for RDP user (change as needed)
+        echo "ubuntu:password123" | sudo chpasswd
+        # Allow RDP through firewall if needed
+        sudo ufw allow 3389
+
+    - name: Get Tailscale IP
+      id: tailscale-ip
+      run: |
+        TAILSCALE_IP=$(tailscale ip -4)
+        echo "RDP_IP=$TAILSCALE_IP" >> $GITHUB_ENV
+        echo "RDP User: ubuntu" >> $GITHUB_STEP_SUMMARY
+        echo "RDP Password: password123" >> $GITHUB_STEP_SUMMARY
+        echo "RDP IP: $TAILSCALE_IP" >> $GITHUB_STEP_SUMMARY
+
+    - name: Log RDP Details
+      run: |
+        echo "RDP is now accessible via Tailscale."
+        echo "Connect using RDP client to IP: ${{ env.RDP_IP }}"
+        echo "Username: ubuntu"
+        echo "Password: password123"
+        echo "You can now open YouTube or other sites in the RDP session."
