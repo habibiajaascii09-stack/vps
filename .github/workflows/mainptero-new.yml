@@ -1,0 +1,260 @@
+name: Ephemeral Pterodactyl Panel (Tailscale) - 6h
+
+on:
+  workflow_dispatch:
+    inputs:
+      panel_domain:
+        description: 'Panel domain (used for APP_URL/nginx server_name, optional)'
+        required: false
+        default: 'panel.panelasip.my.id'
+
+jobs:
+  pterodactyl:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    env:
+      PANEL_PATH: /var/www/pterodactyl
+      ADMIN_EMAIL: ashifaja123@gmail.com
+      ADMIN_PASSWORD: ashifaja123
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Preflight info
+      run: |
+        echo "Starting Ephemeral Pterodactyl installer (minimal)."
+        uname -a
+        lsb_release -a || true
+        free -h || true
+
+    - name: Install Tailscale and bring up (requires secret TAILSCALE_AUTHKEY)
+      run: |
+        set -euo pipefail
+        if [ -z "${{ secrets.TAILSCALE_AUTHKEY }}" ]; then
+          echo "ERROR: TAILSCALE_AUTHKEY secret is not set. Add it in repo Settings -> Secrets -> Actions."
+          exit 1
+        fi
+        curl -fsSL https://tailscale.com/install.sh | sh
+        sudo tailscale up --authkey "${{ secrets.TAILSCALE_AUTHKEY }}" --ssh || true
+        # wait for an IPv4 tailscale to appear (max ~60s)
+        for i in $(seq 1 30); do
+          IP=$(tailscale ip -4 2>/dev/null || true)
+          if [ -n "$IP" ]; then
+            echo "$IP" > /tmp/TS_IP
+            break
+          fi
+          sleep 2
+        done
+        tailscale status || true
+        echo "Tailscale ready."
+
+    - name: Read Tailscale IP
+      id: tsip
+      run: |
+        TS_IP=$(cat /tmp/TS_IP 2>/dev/null || true)
+        if [ -z "$TS_IP" ]; then
+          TS_IP=$(tailscale ip -4 2>/dev/null | head -n1 || true)
+        fi
+        echo "ts_ip=$TS_IP" >> $GITHUB_OUTPUT
+
+    - name: Install SSH server & set SSH password (printed + saved)
+      id: sshinfo
+      run: |
+        set -euo pipefail
+        sudo apt-get update -y
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server openssh-client
+        sudo systemctl enable --now ssh
+
+        SSH_PASS=$(openssl rand -base64 12)
+        echo "runner:$SSH_PASS" | sudo chpasswd
+
+        echo "SSH_USER=runner" >> $GITHUB_OUTPUT
+        echo "SSH_PASS=$SSH_PASS" >> $GITHUB_OUTPUT
+
+        # creds file
+        mkdir -p /home/runner
+        cat > /home/runner/creds.txt <<EOL
+SSH_USER=runner
+SSH_PASS=$SSH_PASS
+EOL
+        sudo chown runner:runner /home/runner/creds.txt
+        echo "SSH ready."
+
+    - name: Install core packages (MariaDB, nginx, redis, utilities)
+      run: |
+        set -euo pipefail
+        sudo apt-get update -y
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common curl unzip tar ufw git ca-certificates
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server redis-server nginx
+        sudo systemctl enable --now mariadb redis-server nginx
+
+    - name: Install PHP 8.2 & extensions
+      run: |
+        set -euo pipefail
+        sudo add-apt-repository ppa:ondrej/php -y
+        sudo apt-get update -y
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y php8.2 php8.2-cli php8.2-fpm php8.2-mysql php8.2-gd php8.2-mbstring php8.2-tokenizer php8.2-bcmath php8.2-xml php8.2-curl php8.2-zip
+        sudo systemctl enable --now php8.2-fpm
+
+    - name: Create DB and user for Pterodactyl
+      id: dbinfo
+      run: |
+        set -euo pipefail
+        DB_PASS=$(openssl rand -base64 16)
+        sudo mysql <<EOF
+CREATE DATABASE IF NOT EXISTS pterodactyl;
+CREATE USER IF NOT EXISTS 'ptero'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
+GRANT ALL PRIVILEGES ON pterodactyl.* TO 'ptero'@'127.0.0.1';
+FLUSH PRIVILEGES;
+EOF
+        echo "DB_PASS=$DB_PASS" >> $GITHUB_OUTPUT
+        # append to creds
+        cat >> /home/runner/creds.txt <<EOL
+DB_USER=ptero
+DB_PASS=$DB_PASS
+EOL
+        sudo chown runner:runner /home/runner/creds.txt
+
+    - name: Install Composer (global)
+      run: |
+        curl -sS https://getcomposer.org/installer -o composer-setup.php
+        php composer-setup.php --install-dir=/usr/local/bin --filename=composer
+        rm composer-setup.php || true
+        composer --version || true
+
+    - name: Download & prepare Pterodactyl Panel (minimal)
+      run: |
+        set -euo pipefail
+        sudo mkdir -p $PANEL_PATH
+        sudo chown $USER:$USER $PANEL_PATH
+        cd $PANEL_PATH
+        curl -L https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz | tar -xz
+        chmod -R 755 storage bootstrap/cache || true
+        cp .env.example .env || true
+
+    - name: Configure .env (DB + APP_URL)
+      run: |
+        set -euo pipefail
+        cd $PANEL_PATH
+        sed -i "s/DB_HOST=.*/DB_HOST=127.0.0.1/" .env
+        sed -i "s/DB_PORT=.*/DB_PORT=3306/" .env
+        sed -i "s/DB_DATABASE=.*/DB_DATABASE=pterodactyl/" .env
+        sed -i "s/DB_USERNAME=.*/DB_USERNAME=ptero/" .env
+        DBPASS="${{ steps.dbinfo.outputs.DB_PASS }}"
+        sed -i "s/DB_PASSWORD=.*/DB_PASSWORD=$DBPASS/" .env
+
+        # APP_URL: use panel_domain input if provided, else fallback to Tailscale IP
+        INPUT_DOMAIN="${{ github.event.inputs.panel_domain }}"
+        if [ -n "$INPUT_DOMAIN" ]; then
+          APP_URL="http://$INPUT_DOMAIN"
+        else
+          APP_URL="http://${{ steps.tsip.outputs.ts_ip }}"
+        fi
+        sed -i "s|APP_URL=.*|APP_URL=$APP_URL|" .env
+
+        echo "APP_URL=$APP_URL" >> /home/runner/creds.txt
+        sudo chown runner:runner /home/runner/creds.txt
+
+    - name: Install PHP deps, generate key, run migrations
+      run: |
+        set -euo pipefail
+        cd $PANEL_PATH
+        composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist || true
+        php artisan key:generate --force || true
+        php artisan config:cache || true
+        php artisan migrate --force --seed || true
+        sudo chown -R www-data:www-data $PANEL_PATH || true
+
+    - name: Create admin user (non-interactive)
+      id: admin
+      run: |
+        set -euo pipefail
+        cd $PANEL_PATH
+        # fixed admin credentials as requested
+        php artisan p:user:make --email="${ADMIN_EMAIL}" --name="Admin" --username="admin" --password="${ADMIN_PASSWORD}" --admin || true
+        echo "ADMIN_EMAIL=${ADMIN_EMAIL}" >> $GITHUB_OUTPUT
+        echo "ADMIN_PASS=${ADMIN_PASSWORD}" >> $GITHUB_OUTPUT
+        # save to creds file
+        cat >> /home/runner/creds.txt <<EOL
+PANEL_ADMIN_EMAIL=${ADMIN_EMAIL}
+PANEL_ADMIN_USER=admin
+PANEL_ADMIN_PASS=${ADMIN_PASSWORD}
+EOL
+        sudo chown runner:runner /home/runner/creds.txt
+
+    - name: Configure nginx for Panel (simple)
+      run: |
+        set -euo pipefail
+        PANEL_DOMAIN="${{ github.event.inputs.panel_domain }}"
+        if [ -z "$PANEL_DOMAIN" ]; then
+          PANEL_DOMAIN="_"
+        fi
+        sudo bash -c "cat > /etc/nginx/sites-available/pterodactyl <<'NGX'
+server {
+    listen 80;
+    server_name PANEL_DOMAIN_PLACEHOLDER;
+    root /var/www/pterodactyl/public;
+    index index.php;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php8.2-fpm.sock;
+    }
+
+    location ~ /\.ht {
+        deny all;
+    }
+}
+NGX"
+        sudo sed -i "s|PANEL_DOMAIN_PLACEHOLDER|${PANEL_DOMAIN}|g" /etc/nginx/sites-available/pterodactyl
+        sudo ln -sf /etc/nginx/sites-available/pterodactyl /etc/nginx/sites-enabled/pterodactyl
+        sudo nginx -t || true
+        sudo systemctl restart nginx || true
+
+    - name: Final output (print + show creds)
+      run: |
+        TS_IP="${{ steps.tsip.outputs.ts_ip }}"
+        DBPASS="${{ steps.dbinfo.outputs.DB_PASS }}"
+        SSH_PASS="${{ steps.sshinfo.outputs.SSH_PASS }}"
+        ADMIN_PASS="${{ steps.admin.outputs.ADMIN_PASS }}"
+        PANEL_DOMAIN="${{ github.event.inputs.panel_domain }}"
+        echo "================================================"
+        echo "      PTERODACTYL PANEL - ACCESS (MINIMAL)"
+        echo "================================================"
+        echo "Tailscale IP: $TS_IP"
+        echo ""
+        echo "Panel URL (use Tailscale if DNS not set):"
+        if [ -n "$PANEL_DOMAIN" ]; then
+          echo "  http://$PANEL_DOMAIN"
+        fi
+        echo "  http://$TS_IP"
+        echo ""
+        echo "Panel Admin:"
+        echo "  email: ${ADMIN_EMAIL}"
+        echo "  password: ${ADMIN_PASSWORD}"
+        echo ""
+        echo "SSH (via Tailscale):"
+        echo "  ssh runner@$TS_IP"
+        echo "  password: $SSH_PASS"
+        echo ""
+        echo "DB user: ptero"
+        echo "DB pass: $DBPASS"
+        echo ""
+        echo "All creds also saved to /home/runner/creds.txt (owner runner)."
+        echo "Runner will stay alive up to 6 hours; save data now."
+        echo "================================================"
+        echo ""
+        echo "====== /home/runner/creds.txt ======"
+        sudo cat /home/runner/creds.txt || true
+
+    - name: Keep runner alive (6 hours)
+      run: |
+        echo "Sleeping for up to 6 hours..."
+        sleep 21600
+        
