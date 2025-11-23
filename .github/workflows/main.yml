@@ -1,0 +1,61 @@
+name: Temporary Tailscale Runner (Max 6 Hours)
+
+on:
+  # Workflow ini akan berjalan ketika Anda memicunya secara manual dari tab Actions di GitHub
+  workflow_dispatch:
+
+jobs:
+  temporary-vps-access:
+    # Anda bisa ganti 'ubuntu-latest' dengan 'windows-latest' jika ingin RDP Windows
+    runs-on: ubuntu-latest
+    
+    # Atur batas waktu Job (maksimal 6 jam adalah batasan dari GitHub)
+    timeout-minutes: 350 
+
+    steps:
+      - name: Checkout Code (Opsional, tapi direkomendasikan)
+        uses: actions/checkout@v4
+
+      - name: Set Up Tailscale (Memerlukan Secret Tailscale)
+        uses: tailscale/github-action@v2
+        with:
+          # Anda HARUS mengganti 'TS_AUTH_KEY' dengan GitHub Secret yang berisi Auth Key Tailscale Anda
+          authkey: ${{ secrets.TS_AUTH_KEY }}
+          # Nama mesin virtual di jaringan Tailscale Anda
+          hostname: github-runner-${{ github.run_id }}
+          
+      - name: Get Runner IP Address
+        run: |
+          # Perintah ini akan menampilkan alamat IP Tailscale dari Runner ini. 
+          # Anda akan menggunakan IP ini untuk SSH
+          ip_address=$(tailscale ip -4)
+          echo "### Runner Tailscale IP (SSH/RDP Target): ${ip_address}" >> $GITHUB_STEP_SUMMARY
+          echo "RUNNER_IP=${ip_address}" >> $GITHUB_ENV
+
+      - name: Install SSH Server and Set Password
+        run: |
+          # 1. Instal SSH Server
+          sudo apt update && sudo apt install -y openssh-server
+
+          # 2. Atur Password untuk User 'runner' (Username default di GitHub Actions)
+          echo "runner:$PASSWORD" | sudo chpasswd
+          
+          # 3. Pastikan SSH service berjalan
+          sudo service ssh start
+        env:
+          # Anda HARUS mengganti 'RUNNER_PASSWORD' dengan GitHub Secret berisi password yang Anda inginkan
+          PASSWORD: ${{ secrets.RUNNER_PASSWORD }}
+
+      - name: Hold Job and Wait for Timeout (Server Running)
+        run: |
+          echo "Runner Tailscale IP: ${{ env.RUNNER_IP }}"
+          echo "SSH User: runner"
+          echo "SSH/RDP siap. Job akan berjalan selama 350 menit (atau sampai Anda membatalkannya)."
+          
+          # Perintah 'sleep' ini yang menahan job agar tidak selesai
+          sleep 350m
+          
+      - name: Job Finished
+        if: always()
+        run: echo "Job selesai. Runner Tailscale telah dimatikan dan akses hilang."
+        
