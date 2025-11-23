@@ -30,6 +30,12 @@ jobs:
           sudo apt update
           sudo apt install -y curl wget gnupg2 software-properties-common
 
+      - name: Stop and Disable Apache2 (if exists)
+        run: |
+          sudo systemctl stop apache2 || true
+          sudo systemctl disable apache2 || true
+          sudo apt remove --purge apache2* -y || true
+
       - name: Install Nginx
         run: |
           sudo apt install -y nginx
@@ -53,7 +59,7 @@ jobs:
           EOF
           sudo ln -s /etc/nginx/sites-available/panel.panelasip.my.id /etc/nginx/sites-enabled/
           sudo nginx -t
-          sudo systemctl reload nginx
+          sudo systemctl restart nginx
 
       - name: Configure Nginx for Pterodactyl Node
         run: |
@@ -72,7 +78,7 @@ jobs:
           EOF
           sudo ln -s /etc/nginx/sites-available/node.panel.my.id /etc/nginx/sites-enabled/
           sudo nginx -t
-          sudo systemctl reload nginx
+          sudo systemctl restart nginx
 
       - name: Install Docker (for Pterodactyl)
         run: |
