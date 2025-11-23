@@ -1,245 +1,132 @@
-name: Pterodactyl Panel (Instalasi MANUAL - Paling Stabil)
+name: VPS and Setup Panel
 
 on:
   workflow_dispatch:
     inputs:
-      ssh_password:
-        description: 'Masukkan Password SSH/SUDO (Wajib)'
-        required: true
-        default: 'P@sswordAman123'
       tailscale_authkey:
-        description: 'Tailscale Auth Key (Reusable - JANGAN GUNAKAN KEY YANG BOCOR)'
+        description: 'Tailscale Auth Key'
         required: true
-        default: 'tskey-auth-...'
+        default: 'tskey-auth-~~~~~~~'
 
 jobs:
-  pterodactyl_manual_install:
+  setup:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
-
-    env:
-      ADMIN_EMAIL: ashifaja123@gmail.com
-      ADMIN_PASSWORD: ashifaja123
-      PANEL_DOMAIN: panel.panelasip.my.id
-      
-      TS_SECRET: ${{ github.event.inputs.tailscale_authkey }} 
-      DB_PASS: ${{ secrets.DB_PASSWORD }} 
-      APP_PASS: ${{ secrets.APP_PASSWORD }} 
-      
-      # Path instalasi Pterodactyl
-      PANEL_PATH: /var/www/pterodactyl
-
     steps:
-      - name: Checkout Kode
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-      - name: Instal Prasyarat, Hapus Konflik, & Setting SSH/Docker
-        env:
-          SSH_PASS: ${{ github.event.inputs.ssh_password }}
+      - name: Install Tailscale
         run: |
-          echo "Memperbarui sistem & menginstal prasyarat dasar..."
-          sudo apt update -y
-          
-          # --- PEMBERSIHAN KRITIS (Apache & Docker Lama) ---
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey ${{ inputs.tailscale_authkey }} --hostname github-runner
+
+      - name: Get Tailscale IP
+        id: tailscale_ip
+        run: |
+          echo "TAILSCALE_IP=$(tailscale ip -4)" >> $GITHUB_ENV
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y curl wget gnupg2 software-properties-common
+
+      - name: Stop and Disable Apache2 (if exists)
+        run: |
           sudo systemctl stop apache2 || true
           sudo systemctl disable apache2 || true
           sudo apt remove --purge apache2* -y || true
-          sudo apt-get remove -y containerd docker.io || true
-          sudo apt-get purge -y containerd docker.io || true
-          
-          # --- INSTALASI DEPENDENCY MANUAL (Pencegahan Exit Code 8) ---
-          sudo add-apt-repository -y ppa:ondrej/php
-          sudo apt update
-          
-          # Menginstal semua paket yang dibutuhkan Pterodactyl Panel secara eksplisit
-          sudo apt install -y curl nginx mariadb-server redis-server composer unzip git
-          sudo apt install -y php8.1-cli php8.1-fpm php8.1-mysql php8.1-zip php8.1-gd php8.1-mbstring php8.1-curl php8.1-xml php8.1-bcmath php8.1-redis
-          
-          # Instalasi Docker
-          curl -fsSL https://get.docker.com -o get-docker.sh
-          sudo sh get-docker.sh
-          
-          # Pengaturan User SSH
-          echo "runner:${{ env.SSH_PASS }}" | sudo chpasswd
-          sudo usermod -aG docker runner
-          sudo systemctl start ssh
-          sudo systemctl enable ssh
-          
-          echo "Semua prasyarat stabil siap."
 
-      - name: Hubungkan ke Tailscale & Dapatkan IP
-        id: ts_setup
+      - name: Install Nginx
         run: |
-          set -e
-          if [ -z "${{ env.TS_SECRET }}" ]; then 
-            echo "::error::Auth Key Tailscale tidak diset. Proses gagal."
-            exit 1
-          fi
-          
-          echo "Menginstal dan menghubungkan Tailscale..."
-          curl -fsSL https://tailscale.com/install.sh | sh
-          
-          sudo tailscale up --authkey "${{ env.TS_SECRET }}" --ssh || true
+          sudo apt install -y nginx
+          sudo systemctl start nginx
+          sudo systemctl enable nginx
 
-          TS_IP=""
-          for i in {1..10}; do
-              TS_IP=$(sudo tailscale ip -4 | head -n1)
-              if [ -n "$TS_IP" ]; then
-                  break
-              fi
-              sleep 2
-          done
-          
-          if [ -z "$TS_IP" ]; then
-              echo "::error::Gagal mendapatkan IP Tailscale. Proses gagal."
-              exit 1
-          fi
-
-          echo "IP Tailscale didapatkan: $TS_IP"
-          echo "ts_ip=$TS_IP" >> $GITHUB_OUTPUT
-
-      - name: Instalasi Pterodactyl Panel (Manual Langkah 1 - Aplikasi)
+      - name: Remove Default Nginx Welcome Page
         run: |
-          echo "Memulai instalasi Panel secara manual..."
-          
-          # 1. Buat direktori dan unduh aplikasi
-          sudo mkdir -p ${{ env.PANEL_PATH }}
-          cd ${{ env.PANEL_PATH }}
-          
-          curl -Lo panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
-          sudo tar -xzvf panel.tar.gz
-          sudo chmod -R 755 storage/* bootstrap/cache/
-          
-          # 2. Instalasi Composer
-          sudo composer install --no-dev --optimize-autoloader
-          
-          # 3. Konfigurasi Environment & Database
-          sudo cp .env.example .env
-          sudo php artisan key:generate --force
-          
-          # Atur file .env
-          sudo sed -i 's/DB_PASSWORD=/DB_PASSWORD=${{ env.DB_PASS }}/g' .env
-          sudo sed -i 's/APP_URL=http:\/\/localhost/APP_URL=http:\/\/${{ env.PANEL_DOMAIN }}/g' .env
-          sudo sed -i 's/APP_ENV=production/APP_ENV=local/g' .env # Agar error lebih detail jika ada masalah
-          
-          # 4. Inisiasi Database
-          sudo mysql -u root -e "CREATE DATABASE IF NOT EXISTS panel;" || true
-          sudo php artisan migrate --force
-          
-          # 5. Konfigurasi Redis & Cache
-          sudo php artisan p:environment:mail
-          sudo php artisan p:environment:database --host=127.0.0.1 --port=3306 --database=panel --username=root --password='${{ env.DB_PASS }}'
-          sudo php artisan p:environment:redis --host=127.0.0.1 --port=6379 --database=0
-          sudo php artisan optimize
-
-      - name: Buat Akun Admin & Queue Worker (Manual Langkah 2)
-        run: |
-          cd ${{ env.PANEL_PATH }}
-          
-          # 1. Buat Akun Admin
-          echo "Membuat akun admin dengan kredensial tetap..."
-          sudo php artisan p:user:make \
-            --email="${{ env.ADMIN_EMAIL }}" \
-            --name="AdminPanel" \
-            --username="admin" \
-            --password="${{ env.ADMIN_PASSWORD }}" \
-            --admin || true
-            
-          # 2. Setting File Permission Final
-          sudo chown -R www-data:www-data ${{ env.PANEL_PATH }}/*
-          
-          # 3. Queue Worker (Menggunakan supervisor)
-          sudo apt install -y supervisor
-          sudo tee /etc/supervisor/conf.d/pterodactyl.conf > /dev/null <<EOF
-          [program:pterodactyl]
-          command=/usr/bin/php ${{ env.PANEL_PATH }}/artisan queue:work --queue=default --sleep=3 --tries=3 --daemon
-          user=www-data
-          autostart=true
-          autorestart=true
-          stopasgroup=true
-          killasgroup=true
-          stderr_logfile=/var/log/supervisor/pterodactyl-worker.log
-          stdout_logfile=/var/log/supervisor/pterodactyl-worker.log
-          EOF
-          
-          sudo supervisorctl reread
-          sudo supervisorctl update
-          sudo supervisorctl start pterodactyl
-
-      - name: Konfigurasi Nginx (Manual Langkah 3 - FIX Welcome Page)
-        env:
-          FQDN: ${{ env.PANEL_DOMAIN }}
-        run: |
-          echo "Mengkonfigurasi Nginx agar mengarah ke Panel..."
-          
-          # Hapus konfigurasi default Nginx
           sudo rm -f /etc/nginx/sites-enabled/default
-          
-          # Buat konfigurasi Nginx untuk Panel
-          sudo tee /etc/nginx/sites-available/pterodactyl.conf > /dev/null <<EOF
+          sudo rm -f /var/www/html/index.nginx-debian.html
+
+      - name: Configure Nginx Default Server Block to Proxy to Panel
+        run: |
+          sudo tee /etc/nginx/sites-available/default > /dev/null <<EOF
           server {
-              listen 80;
-              server_name ${{ env.FQDN }};
-          
-              root ${{ env.PANEL_PATH }}/public;
-              index index.php;
-          
-              access_log /var/log/nginx/pterodactyl.app-access.log;
-              error_log /var/log/nginx/pterodactyl.app-error.log error;
-          
-              client_max_body_size 100m;
-          
-              location ~ \.php$ {
-                  fastcgi_split_path_info ^(.+\.php)(/.+)$;
-                  fastcgi_pass unix:/run/php/php8.1-fpm.sock;
-                  fastcgi_index index.php;
-                  include fastcgi_params;
-                  fastcgi_param PHP_VALUE "upload_max_filesize = 100M \n post_max_size = 100M";
-                  fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-                  fastcgi_param HTTP_PROXY "";
-                  fastcgi_buffer_size 128k;
-                  fastcgi_buffers 4 256k;
-                  fastcgi_busy_buffers_size 256k;
-              }
-          
+              listen 80 default_server;
+              server_name _;
               location / {
-                  try_files \$uri \$uri/ /index.php?\$query_string;
+                  proxy_pass http://localhost:8080;
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto \$scheme;
               }
           }
           EOF
-          
-          # Aktifkan V-Host
-          sudo ln -s /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/pterodactyl.conf
-          
-          # Tes dan Restart Nginx
+          sudo ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/
           sudo nginx -t
           sudo systemctl restart nginx
 
-      - name: Final Output & Tahan Pekerjaan
-        env:
-          FQDN: ${{ env.PANEL_DOMAIN }}
-          TS_IP: ${{ steps.ts_setup.outputs.ts_ip }}
+      - name: Configure Nginx for Pterodactyl Panel
         run: |
-          echo "================================================"
-          echo "  PTERODACTYL PANEL - INSTALASI MANUAL SUKSES!"
-          echo "================================================"
-          echo "WAKTU AKTIF: ~5.8 JAM" 
-          echo ""
-          echo "1. AKSES PANEL (Via Tailscale):"
-          echo "   URL: http://${{ env.FQDN }}"
-          echo "   URL (Fallback IP Tailscale): http://${{ env.TS_IP }}"
-          echo "   MASALAH NGINX DIPERBAIKI. Halaman login Panel sudah siap."
-          echo ""
-          echo "2. KREDENSIAL ADMIN (Panel):"
-          echo "   Email: ${{ env.ADMIN_EMAIL }}"
-          echo "   Password: ${{ env.ADMIN_PASSWORD }}"
-          echo "   (Username: admin)"
-          echo ""
-          echo "3. AKSES SSH (Via Tailscale):"
-          echo "   SSH User: runner"
-          echo "   SSH Pass: ${{ github.event.inputs.ssh_password }}"
-          echo "   Command: ssh runner@${{ env.TS_IP }}"
-          echo ""
-          echo "================================================"
-          echo "Panel Pterodactyl siap. Menunggu 350 menit..."
-          sleep 21000
+          sudo tee /etc/nginx/sites-available/panel.panelasip.my.id > /dev/null <<EOF
+          server {
+              listen 80;
+              server_name panel.panelasip.my.id;
+              location / {
+                  proxy_pass http://localhost:8080;
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto \$scheme;
+              }
+          }
+          EOF
+          sudo ln -s /etc/nginx/sites-available/panel.panelasip.my.id /etc/nginx/sites-enabled/
+          sudo nginx -t
+          sudo systemctl restart nginx
+
+      - name: Configure Nginx for Pterodactyl Node
+        run: |
+          sudo tee /etc/nginx/sites-available/node.panel.my.id > /dev/null <<EOF
+          server {
+              listen 80;
+              server_name node.panel.my.id;
+              location / {
+                  proxy_pass http://localhost:8081;
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto \$scheme;
+              }
+          }
+          EOF
+          sudo ln -s /etc/nginx/sites-available/node.panel.my.id /etc/nginx/sites-enabled/
+          sudo nginx -t
+          sudo systemctl restart nginx
+
+      - name: Install Docker (for Pterodactyl)
+        run: |
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sudo sh get-docker.sh
+          sudo systemctl start docker
+          sudo systemctl enable docker
+
+      - name: Install Pterodactyl Panel
+        run: |
+          curl -sSL https://pterodactyl-installer.sebastian-lehrbach.de/ | sudo bash -s -- --panel-only --email ashifaja123@gmail.com --password ashifaja123 --hostname panel.panelasip.my.id --port 8080
+
+      - name: Install Pterodactyl Wings (Node)
+        run: |
+          curl -sSL https://pterodactyl-installer.sebastian-lehrbach.de/ | sudo bash -s -- --wings-only --panel-url https://panel.panelasip.my.id --token YOUR_WINGS_TOKEN --hostname node.panel.my.id --port 8081
+
+      - name: Output Information
+        run: |
+          echo "IP VPS: ${{ env.TAILSCALE_IP }}"
+          echo "VPS Password: (Default Ubuntu runner, no password set)"
+          echo "Akun Panel: ashifaja123@gmail.com"
+          echo "Password Panel: ashifaja123"
+
+      - name: Keep Runner Running for 6 Hours
+        run: |
+          echo "Runner akan berjalan terus selama 6 jam..."
+          sleep 21600  # 6 jam dalam detik
