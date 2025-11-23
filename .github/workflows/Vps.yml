@@ -1,0 +1,54 @@
+name: Tailscale Runner HP Version (Max 6 Hours)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  temporary-vps-access:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 1. Setup Tailscale 
+      - name: Set Up Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TS_AUTH_KEY }}
+          hostname: github-runner-${{ github.run_id }}
+          
+      # 2. Instal SSH Server
+      - name: Install OpenSSH Server
+        run: sudo apt update && sudo apt install -y openssh-server
+
+      # 3. MENGUBAH PASSWORD dengan 'passwd'
+      # Perintah ini mengirimkan password baru melalui stdin,
+      # yang mungkin menghindari batasan keamanan 'chpasswd'
+      - name: Set Password for Runner User
+        run: echo -e "${{ secrets.RUNNER_PASSWORD }}\n${{ secrets.RUNNER_PASSWORD }}" | sudo passwd runner
+        env:
+          # Pastikan SECRET RUNNER_PASSWORD terisi
+          RUNNER_PASSWORD: ${{ secrets.RUNNER_PASSWORD }}
+
+      # 4. Mendapatkan IP Address dan Informasi Koneksi
+      - name: Get Connection Information
+        run: |
+          ip_address=$(tailscale ip -4)
+          echo "### ✅ Runner Siap diakses via SSH" >> $GITHUB_STEP_SUMMARY
+          echo "SSH Command: ssh runner@${ip_address}" >> $GITHUB_STEP_SUMMARY
+          echo "Password: Gunakan Secret RUNNER_PASSWORD Anda" >> $GITHUB_STEP_SUMMARY
+          echo "Timeout: 350 menit" >> $GITHUB_STEP_SUMMARY
+          echo "RUNNER_IP=${ip_address}" >> $GITHUB_ENV
+
+      - name: Hold Job and Wait for Timeout
+        run: |
+          echo "SSH Access: runner@${{ env.RUNNER_IP }}"
+          echo "Job akan berjalan selama 350 menit (atau sampai dibatalkan)."
+          sleep 350m
+          
+      - name: Job Finished
+        if: always()
+        run: echo "Job selesai. Runner telah dimatikan."
+        
