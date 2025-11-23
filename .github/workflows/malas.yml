@@ -1,0 +1,56 @@
+name: Tailscale Nginx Runner - Default User (Max 6 Hours)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  temporary-web-access:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 1. Setup Tailscale (Membutuhkan Secret TS_AUTH_KEY)
+      - name: Set Up Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TS_AUTH_KEY }}
+          hostname: nginx-runner-${{ github.run_id }}
+          
+      # 2. Instalasi Nginx dan OpenSSH Server
+      - name: Install Nginx, SSH, and dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y nginx openssh-server
+          
+          # Hapus langkah mengubah password. Kita akan pakai kredensial default.
+
+      # 3. Memastikan Layanan Berjalan
+      - name: Start Services
+        run: |
+          sudo service nginx start
+          sudo service ssh start
+          echo "Nginx & SSH sudah berjalan di runner."
+
+      # 4. Mendapatkan IP dan Informasi Koneksi
+      - name: Get Connection Information
+        run: |
+          ip_address=$(tailscale ip -4)
+          echo "### ✅ Runner Siap diakses" >> $GITHUB_STEP_SUMMARY
+          echo "🌐 Akses Web (Nginx): http://${ip_address}" >> $GITHUB_STEP_SUMMARY
+          echo "💻 Akses SSH: ssh runner@${ip_address}" >> $GITHUB_STEP_SUMMARY
+          echo "Password: **Silakan coba password default dari GitHub** (atau kosong jika tidak ada)" >> $GITHUB_STEP_SUMMARY
+          echo "RUNNER_IP=${ip_address}" >> $GITHUB_ENV
+
+      # 5. Menahan Job dan Menunggu Timeout
+      - name: Hold Job and Wait for Timeout (Server Running)
+        run: |
+          echo "Job akan berjalan selama 350 menit (sampai dibatalkan atau timeout)."
+          sleep 350m
+          
+      - name: Job Finished
+        if: always()
+        run: echo "Job selesai. Runner telah dimatikan dan semua data hilang."
+        
