@@ -1,0 +1,305 @@
+name: Ephemeral Pterodactyl Panel + Wings (Tailscale) - 6h
+
+on:
+  workflow_dispatch:
+    inputs:
+      hostname:
+        description: 'Informal hostname (used if Tailscale IP missing)'
+        required: false
+        default: 'ashifaja123'
+      admin_email:
+        description: 'Admin email untuk panel'
+        required: true
+        default: 'ashifaja123@gmail.com'
+
+jobs:
+  pterodactyl:
+    runs-on: ubuntu-latest
+    # Keep within the GitHub Actions max runtime (6 hours)
+    timeout-minutes: 360
+
+    env:
+      PANEL_PATH: /var/www/pterodactyl
+      WINGS_PATH: /etc/pterodactyl
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install Tailscale and bring up (SSH enabled)
+      run: |
+        set -e
+        curl -fsSL https://tailscale.com/install.sh | sh
+        # Use repo secret TAILSCALE_AUTHKEY (must be added in GitHub repo secrets)
+        sudo tailscale up --authkey "${{ secrets.TAILSCALE_AUTHKEY }}" --ssh || true
+        echo "TAILSCALE IPv4 addrs:"
+        tailscale ip -4 || true
+        tailscale ip -4 > /tmp/TS_IP || true
+
+    - name: Read Tailscale IP
+      id: tsip
+      run: |
+        TS_IP=$(cat /tmp/TS_IP 2>/dev/null | head -n1 || true)
+        if [ -z "$TS_IP" ]; then
+          TS_IP=$(tailscale ip -4 2>/dev/null | head -n1 || true)
+        fi
+        echo "ts_ip=$TS_IP" >> $GITHUB_OUTPUT
+
+    - name: Install SSH server & set SSH password (printed to log)
+      id: sshinfo
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y openssh-server
+        sudo systemctl enable --now ssh
+
+        SSH_PASS=$(openssl rand -base64 12)
+        echo "runner:$SSH_PASS" | sudo chpasswd
+
+        echo "SSH_USER=runner" >> $GITHUB_OUTPUT
+        echo "SSH_PASS=$SSH_PASS" >> $GITHUB_OUTPUT
+
+        echo "======================================"
+        echo "SSH LOGIN (via Tailscale IP):"
+        echo "  ssh runner@${{ steps.tsip.outputs.ts_ip }}"
+        echo "  PASSWORD: $SSH_PASS"
+        echo "======================================"
+
+    - name: Install core packages (MariaDB, nginx, redis, git)
+      run: |
+        set -e
+        sudo apt-get update -y
+        sudo apt-get install -y software-properties-common curl unzip tar ufw git ca-certificates
+        sudo apt-get install -y mariadb-server redis-server nginx
+        sudo systemctl enable --now mariadb redis-server nginx
+
+    - name: Install PHP 8.2 & extensions
+      run: |
+        set -e
+        sudo add-apt-repository ppa:ondrej/php -y
+        sudo apt-get update -y
+        sudo apt-get install -y php8.2 php8.2-cli php8.2-fpm php8.2-mysql php8.2-gd \
+          php8.2-mbstring php8.2-tokenizer php8.2-bcmath php8.2-xml php8.2-curl php8.2-zip
+        sudo systemctl enable --now php8.2-fpm
+
+    - name: Create database + user for Panel
+      id: dbinfo
+      run: |
+        set -e
+        DB_PASS=$(openssl rand -base64 16)
+        sudo mysql <<EOF
+CREATE DATABASE IF NOT EXISTS pterodactyl;
+CREATE USER IF NOT EXISTS 'ptero'@'127.0.0.1' IDENTIFIED BY '$DB_PASS';
+GRANT ALL PRIVILEGES ON pterodactyl.* TO 'ptero'@'127.0.0.1';
+FLUSH PRIVILEGES;
+EOF
+        echo "DB_PASS=$DB_PASS" >> $GITHUB_OUTPUT
+        echo "Created DB pterodactyl and user ptero"
+
+    - name: Install Composer (global)
+      run: |
+        curl -sS https://getcomposer.org/installer -o composer-setup.php
+        php composer-setup.php --install-dir=/usr/local/bin --filename=composer
+        rm composer-setup.php
+        composer --version || true
+
+    - name: Download & Prepare Pterodactyl Panel
+      run: |
+        set -e
+        sudo mkdir -p $PANEL_PATH
+        sudo chown $USER:$USER $PANEL_PATH
+        cd $PANEL_PATH
+        curl -L https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz | tar -xz
+        chmod -R 755 storage bootstrap/cache || true
+        cp .env.example .env || true
+
+    - name: Configure .env (DB + APP_URL)
+      run: |
+        set -e
+        cd $PANEL_PATH
+        sed -i "s/DB_HOST=.*/DB_HOST=127.0.0.1/" .env
+        sed -i "s/DB_PORT=.*/DB_PORT=3306/" .env
+        sed -i "s/DB_DATABASE=.*/DB_DATABASE=pterodactyl/" .env
+        sed -i "s/DB_USERNAME=.*/DB_USERNAME=ptero/" .env
+        DBPASS="${{ steps.dbinfo.outputs.DB_PASS }}"
+        sed -i "s/DB_PASSWORD=.*/DB_PASSWORD=$DBPASS/" .env
+
+        TS_IP="${{ steps.tsip.outputs.ts_ip }}"
+        if [ -n "$TS_IP" ]; then
+          APP_URL="http://$TS_IP"
+        else
+          APP_URL="http://${{ github.event.inputs.hostname }}"
+        fi
+        sed -i "s|APP_URL=.*|APP_URL=$APP_URL|" .env
+        echo "APP_URL set to $APP_URL"
+
+    - name: Install panel PHP deps, generate key, migrate, seed
+      run: |
+        set -e
+        cd $PANEL_PATH
+        composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist || true
+        php artisan key:generate --force || true
+        php artisan config:cache || true
+        php artisan migrate --force --seed || true
+        sudo chown -R www-data:www-data $PANEL_PATH || true
+
+    - name: Create admin user (attempt)
+      id: admin
+      run: |
+        set -e
+        cd $PANEL_PATH
+        ADMIN_PASS=$(openssl rand -base64 12)
+        php artisan p:user:make --email="${{ github.event.inputs.admin_email }}" --name="Admin" --username="admin" --password="$ADMIN_PASS" --admin || true
+        echo "ADMIN_PASS=$ADMIN_PASS" >> $GITHUB_OUTPUT
+        echo "If artisan create-user failed, use web UI to finish with above password."
+
+    - name: Configure nginx for Panel
+      run: |
+        set -e
+        sudo bash -c "cat > /etc/nginx/sites-available/pterodactyl <<'NGX'
+server {
+    listen 80;
+    server_name _;
+
+    root /var/www/pterodactyl/public;
+    index index.php;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php8.2-fpm.sock;
+    }
+
+    location ~ /\.ht {
+        deny all;
+    }
+}
+NGX"
+        sudo ln -sf /etc/nginx/sites-available/pterodactyl /etc/nginx/sites-enabled/pterodactyl
+        sudo nginx -t || true
+        sudo systemctl restart nginx || true
+
+    - name: Create install_wings.sh (manual / auto-run helper)
+      run: |
+        sudo mkdir -p $WINGS_PATH
+        sudo chown $USER:$USER $WINGS_PATH
+        cat > /home/runner/install_wings.sh <<'SH'
+#!/bin/bash
+set -e
+WINGS_DIR="/etc/pterodactyl"
+WINGS_TOKEN="${WINGS_TOKEN:-}"
+PANEL_URL="${PANEL_URL:-}"
+
+if [ -z "$WINGS_TOKEN" ] || [ -z "$PANEL_URL" ]; then
+  echo "WINGS_TOKEN or PANEL_URL missing. Provide WINGS_TOKEN and PANEL_URL to auto-install wings."
+  exit 2
+fi
+
+echo "Installing Docker..."
+sudo apt-get update -y
+sudo apt-get install -y docker.io
+sudo systemctl enable --now docker
+
+echo "Creating pterodactyl user..."
+sudo useradd -r -m -U -d /var/lib/pterodactyl -s /bin/false pterodactyl || true
+
+echo "Downloading wings binary..."
+WINGS_URL=$(curl -s https://api.github.com/repos/pterodactyl/wings/releases/latest | grep browser_download_url | grep linux_amd64 | cut -d '\"' -f 4)
+if [ -n "$WINGS_URL" ]; then
+  sudo curl -L "$WINGS_URL" -o /usr/local/bin/wings
+  sudo chmod +x /usr/local/bin/wings
+else
+  echo "Wings binary URL not found automatically; download manually for your arch."
+fi
+
+sudo mkdir -p /etc/pterodactyl
+sudo chown -R pterodactyl:pterodactyl /etc/pterodactyl
+
+cat > /etc/pterodactyl/config.yml <<EOL
+panel:
+  host: "$PANEL_URL"
+  key: "$WINGS_TOKEN"
+EOL
+
+sudo bash -c 'cat > /etc/systemd/system/wings.service <<EOF
+[Unit]
+Description=Pterodactyl Wings
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+User=pterodactyl
+Group=pterodactyl
+Environment=WINGS_CONFIG=/etc/pterodactyl/config.yml
+WorkingDirectory=/etc/pterodactyl
+ExecStart=/usr/local/bin/wings
+Restart=on-failure
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF'
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now wings || true
+
+echo "Wings attempted to start (check logs)."
+SH
+        sudo chmod +x /home/runner/install_wings.sh
+        echo "install_wings.sh created at /home/runner/install_wings.sh"
+
+    - name: Auto-install Wings if WINGS_TOKEN secret exists
+      if: ${{ secrets.WINGS_TOKEN != '' }}
+      env:
+        WINGS_TOKEN: ${{ secrets.WINGS_TOKEN }}
+        PANEL_URL: ${{ steps.tsip.outputs.ts_ip && format('http://{0}', steps.tsip.outputs.ts_ip) || format('http://{0}', github.event.inputs.hostname) }}
+      run: |
+        echo "WINGS_TOKEN present; attempting auto-install of Wings."
+        chmod +x /home/runner/install_wings.sh
+        sudo WINGS_TOKEN="${WINGS_TOKEN}" PANEL_URL="${PANEL_URL}" /home/runner/install_wings.sh || true
+
+    - name: Final output — Panel + SSH + Admin + Wings info
+      run: |
+        TS_IP="${{ steps.tsip.outputs.ts_ip }}"
+        DBPASS="${{ steps.dbinfo.outputs.DB_PASS }}"
+        SSH_PASS="${{ steps.sshinfo.outputs.SSH_PASS }}"
+        ADMIN_PASS="${{ steps.admin.outputs.ADMIN_PASS }}"
+        echo "================================================"
+        echo "         PTERODACTYL PANEL - ACCESS INFO"
+        echo "================================================"
+        echo "Tailscale IP: $TS_IP"
+        echo ""
+        echo "SSH (via Tailscale):"
+        echo "  ssh runner@$TS_IP"
+        echo "  password: $SSH_PASS"
+        echo ""
+        echo "Pterodactyl Panel URL (Tailscale):"
+        echo "  http://$TS_IP"
+        echo ""
+        echo "Panel Admin Login (attempt created):"
+        echo "  email: ${{ github.event.inputs.admin_email }}"
+        echo "  username: admin"
+        echo "  password: $ADMIN_PASS"
+        echo ""
+        if [ -n "${{ secrets.WINGS_TOKEN }}" ]; then
+          echo "Wings was attempted to be auto-installed and started."
+          echo "Wings should be reachable on Tailscale IP (daemon ports depend on config)."
+        else
+          echo "WINGS_TOKEN not provided. To install Wings and register it with the Panel:"
+          echo "  1) Create a daemon token in Panel UI after panel is live."
+          echo "  2) SSH in: ssh runner@$TS_IP (password printed above)."
+          echo "  3) Run: sudo WINGS_TOKEN=\"<token>\" PANEL_URL=\"http://$TS_IP\" /home/runner/install_wings.sh"
+        fi
+        echo ""
+        echo "DB USER: ptero"
+        echo "DB PASS: $DBPASS"
+        echo "Note: Runner & all data will be gone after workflow ends or ~6 hours."
+        echo "================================================"
+
+    - name: Keep Runner Alive (6 hours)
+      run: |
+        echo "Runner will sleep up to 6 hours. Save credentials from logs now."
+        sleep 21600
+        
