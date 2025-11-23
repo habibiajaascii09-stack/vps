@@ -119,6 +119,54 @@ jobs:
         run: |
           curl -sSL https://pterodactyl-installer.sebastian-lehrbach.de/ | sudo bash -s -- --wings-only --panel-url https://panel.panelasip.my.id --token YOUR_WINGS_TOKEN --hostname node.panel.my.id --port 8081
 
+      - name: Verify and Restart Services
+        run: |
+          # Check if panel is running on port 8080
+          if sudo netstat -tlnp | grep -q :8080; then
+            echo "Panel is running on port 8080"
+          else
+            echo "Panel not running, attempting to start..."
+            sudo systemctl start pterodactyl-panel || echo "Failed to start panel"
+          fi
+          # Check if wings is running on port 8081
+          if sudo netstat -tlnp | grep -q :8081; then
+            echo "Wings is running on port 8081"
+          else
+            echo "Wings not running, attempting to start..."
+            sudo systemctl start wings || echo "Failed to start wings"
+          fi
+          # Restart Nginx to ensure proxy is working
+          sudo systemctl restart nginx
+
+      - name: Create Info Page for Website
+        run: |
+          sudo mkdir -p /var/www/html
+          sudo tee /var/www/html/index.html > /dev/null <<EOF
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>Pterodactyl Setup Info</title>
+          </head>
+          <body>
+              <h1>Pterodactyl Panel and Wings Setup</h1>
+              <p><strong>IP VPS:</strong> ${{ env.TAILSCALE_IP }}</p>
+              <p><strong>VPS Password:</strong> (Default Ubuntu runner, no password set)</p>
+              <p><strong>Akun Panel:</strong> ashifaja123@gmail.com</p>
+              <p><strong>Password Panel:</strong> ashifaja123</p>
+              <p><strong>Panel URL:</strong> <a href="http://panel.panelasip.my.id">panel.panelasip.my.id</a></p>
+              <p><strong>Node URL:</strong> <a href="http://node.panel.my.id">node.panel.my.id</a></p>
+              <h2>Service Status:</h2>
+              <pre>$(sudo systemctl status pterodactyl-panel --no-pager -l 2>/dev/null || echo "Panel service not found")</pre>
+              <pre>$(sudo systemctl status wings --no-pager -l 2>/dev/null || echo "Wings service not found")</pre>
+              <pre>$(sudo systemctl status nginx --no-pager -l 2>/dev/null || echo "Nginx service not found")</pre>
+              <h2>Running Processes:</h2>
+              <pre>$(ps aux | grep -E "(pterodactyl|wings|nginx)" | head -20)</pre>
+          </body>
+          </html>
+          EOF
+
       - name: Output Information
         run: |
           echo "IP VPS: ${{ env.TAILSCALE_IP }}"
