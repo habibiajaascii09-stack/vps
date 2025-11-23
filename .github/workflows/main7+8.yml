@@ -1,0 +1,103 @@
+name: Pterodactyl & Bot WA Auto-Install (6 Jam)
+
+on:
+  workflow_dispatch: # Jalankan secara manual dari tab Actions
+
+jobs:
+  pterodactyl_install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 # Maksimum waktu berjalan di GitHub
+
+    steps:
+      - name: Checkout Kode
+        uses: actions/checkout@v4
+
+      - name: Instal SSH Server, Nginx, dan Tetapkan Password
+        env:
+          SSH_PASS: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          echo "Memperbarui sistem..."
+          sudo apt update -y
+          
+          echo "Menginstal OpenSSH server dan Nginx..."
+          sudo apt install -y docker.io wget curl unzip openssh-server sshpass nginx net-tools
+          
+          # Aktifkan Docker
+          sudo systemctl start docker
+          sudo systemctl enable docker
+          
+          # Menetapkan Password untuk user 'runner'
+          echo "runner:$SSH_PASS" | sudo chpasswd
+          
+          # Aktifkan dan mulai SSH & Nginx
+          sudo systemctl start ssh
+          sudo systemctl enable ssh
+          sudo systemctl start nginx
+          
+          # Hapus pesan peringatan (motd) agar terminal lebih bersih
+          sudo rm -f /etc/update-motd.d/*
+          
+          echo "SSH, Nginx, dan Docker telah siap."
+
+      - name: Dapatkan IP Publik Runner
+        id: ip_step
+        run: |
+          # Perintah untuk mendapatkan IP publik
+          PUBLIC_IP=$(curl -s ifconfig.me)
+          
+          echo "================================================="
+          echo "AKSES UNTUK ANDA (WAJIB DILIHAT)"
+          echo "================================================="
+          echo "IP PUBLIK (Untuk Web Panel & SSH): ${PUBLIC_IP}"
+          echo "Username SSH: runner"
+          echo "Password SSH: ${{ secrets.SSH_PASSWORD }}"
+          echo "================================================="
+          
+          # FIX: Menggunakan GITHUB_OUTPUT sesuai peringatan GitHub
+          echo "public_ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
+          
+          # Tunda sejenak
+          sleep 5
+
+      - name: Instalasi Pterodactyl Panel & Wings (Otomatis)
+        env:
+          DB_PASS: ${{ secrets.DB_PASSWORD }}
+          APP_PASS: ${{ secrets.APP_PASSWORD }}
+          ADMIN_MAIL: ${{ secrets.ADMIN_EMAIL }}
+          # Ambil IP dari output langkah sebelumnya
+          FQDN_IP: ${{ steps.ip_step.outputs.public_ip }}
+        run: |
+          echo "Menjalankan instalasi utama Panel & Wings. Proses ini akan memakan waktu 10-30 menit. Mohon tunggu..."
+          
+          # Tambahkan user runner ke grup docker sebelum menjalankan skrip Pterodactyl
+          sudo usermod -aG docker runner
+          
+          # Download skrip instalasi Pterodactyl
+          sudo wget -qO install.sh https://raw.githubusercontent.com/pterodactyl/installation-script/master/install.sh
+          sudo chmod +x install.sh
+          
+          # Jalankan skrip utama sebagai sudo dengan variabel dari GitHub Secrets
+          # Menggunakan IP publik sebagai FQDN darurat agar instalasi selesai
+          sudo ./install.sh --panel --wings --db-password $DB_PASS --app-password $APP_PASS --admin-email $ADMIN_MAIL --fqdn $FQDN_IP
+          
+          echo "Instalasi Pterodactyl Selesai."
+          
+      - name: Persiapan Lingkungan Bot WhatsApp (Node.js)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # Versi Node.js yang stabil untuk bot
+
+      - name: Setup Folder Bot WA
+        run: |
+          mkdir -p /home/runner/whatsapp_bot
+          cp whatsapp_bot_placeholder.sh /home/runner/whatsapp_bot/run_bot.sh
+          chmod +x /home/runner/whatsapp_bot/run_bot.sh
+          
+          echo "Lingkungan Bot WA siap di /home/runner/whatsapp_bot/."
+
+      - name: Tahan Pekerjaan dan Tunggu Waktu Habis (agar VPS tetap aktif)
+        run: |
+          echo "Panel Pterodactyl dan SSH sudah siap."
+          echo "Silakan SSH ke IP Publik yang didapatkan di atas untuk login ke VPS Anda."
+          echo "Job akan berjalan selama 350 menit (sampai dibatalkan atau timeout). Nikmati VPS Anda!"
+          sleep 21000 # Menunggu 350 menit
