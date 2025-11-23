@@ -1,0 +1,57 @@
+name: Akses Runner HP - IP Jelas (Max 6 Jam)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  temporary-web-access:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set Up Tailscale (Secret: TS_AUTH_KEY)
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TS_AUTH_KEY }}
+          hostname: final-runner-${{ github.run_id }}
+          
+      - name: Install Services
+        run: |
+          sudo apt update
+          sudo apt install -y nginx openssh-server
+
+      # Menggunakan metode 'passwd' untuk mengubah password
+      - name: Set Password for Runner User (Secret: RUNNER_PASSWORD)
+        run: echo -e "${{ secrets.RUNNER_PASSWORD }}\n${{ secrets.RUNNER_PASSWORD }}" | sudo passwd runner
+        env:
+          # Password Anda yang ada di Secret
+          RUNNER_PASSWORD: ${{ secrets.RUNNER_PASSWORD }}
+
+      - name: Start Services & Get IP Address
+        run: |
+          sudo service nginx start
+          sudo service ssh start
+          ip_address=$(tailscale ip -4)
+          
+          # --- OUTPUT IP & PASSWORD KE SUMMARY LOG ---
+          echo "### ✅ AKSES ANDA TELAH SIAP (MAX 6 JAM) " >> $GITHUB_STEP_SUMMARY
+          echo "🌐 **ALAMAT IP (HOST):** \`${ip_address}\`" >> $GITHUB_STEP_SUMMARY
+          echo "💻 **USER NAME:** \`runner\`" >> $GITHUB_STEP_SUMMARY
+          echo "🔑 **PASSWORD:** Gunakan Secret \`RUNNER_PASSWORD\` Anda (misal: Rahasia123)" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "Pastikan Tailscale di HP Anda AKTIF." >> $GITHUB_STEP_SUMMARY
+          echo "RUNNER_IP=${ip_address}" >> $GITHUB_ENV
+
+      - name: Tahan Job dan Tunggu Timeout
+        run: |
+          echo "Runner berjalan di IP: ${{ env.RUNNER_IP }}"
+          echo "Job akan ditahan selama 350 menit."
+          sleep 350m
+          
+      - name: Job Finished
+        if: always()
+        run: echo "Runner telah dimatikan."
+        
