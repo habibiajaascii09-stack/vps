@@ -45,6 +45,13 @@ jobs:
           sudo systemctl disable apache2 || true
           sudo apt remove --purge apache2* -y || true
 
+      - name: Install Docker
+        run: |
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sudo sh get-docker.sh
+          sudo systemctl start docker
+          sudo systemctl enable docker
+
       - name: Install Nginx
         run: |
           sudo apt install -y nginx
@@ -116,51 +123,35 @@ jobs:
           sudo nginx -t
           sudo systemctl restart nginx
 
-      - name: Install Docker (for Pterodactyl)
+      - name: Run Pterodactyl Panel via Docker
         run: |
-          curl -fsSL https://get.docker.com -o get-docker.sh
-          sudo sh get-docker.sh
-          sudo systemctl start docker
-          sudo systemctl enable docker
+          sudo docker run -d --name pterodactyl-panel -p 8080:80 -e APP_URL=http://localhost -e APP_ENV=production -e DB_CONNECTION=sqlite pterodactyl/panel:latest
+          # Wait for container to start
+          sleep 30
+          # Create admin user
+          sudo docker exec pterodactyl-panel php artisan p:user:make --email=ashifaja123@gmail.com --password=ashifaja123 --admin=1
 
-      - name: Install Pterodactyl Panel
+      - name: Run Pterodactyl Wings via Docker
         run: |
-          curl -sSL https://pterodactyl-installer.sebastian-lehrbach.de/ | sudo bash -s -- --panel-only --email ashifaja123@gmail.com --password ashifaja123 --hostname panel.panelasip.my.id --port 8080
-
-      - name: Install Pterodactyl Wings (Node)
-        run: |
-          curl -sSL https://pterodactyl-installer.sebastian-lehrbach.de/ | sudo bash -s -- --wings-only --panel-url https://panel.panelasip.my.id --token YOUR_WINGS_TOKEN --hostname node.panel.my.id --port 8081
-
-      - name: Verify and Start Services Manually if Needed
-        run: |
-          # Check if panel is running on port 8080
-          if sudo netstat -tlnp | grep -q :8080; then
-            echo "Panel is running on port 8080"
-          else
-            echo "Panel not running, attempting to start manually..."
-            # Assuming panel is installed in /var/www/pterodactyl or similar
-            cd /var/www/pterodactyl || cd /srv/pterodactyl || echo "Panel directory not found"
-            if [ -f artisan ]; then
-              sudo php artisan serve --host=0.0.0.0 --port=8080 &
-              echo "Started panel manually on port 8080"
-            else
-              echo "Artisan file not found, panel may not be installed correctly"
-            fi
-          fi
-          # Check if wings is running on port 8081
-          if sudo netstat -tlnp | grep -q :8081; then
-            echo "Wings is running on port 8081"
-          else
-            echo "Wings not running, attempting to start..."
-            sudo systemctl start wings || echo "Failed to start wings via systemctl"
-            # If systemctl fails, try manual start if wings binary exists
-            if ! sudo netstat -tlnp | grep -q :8081; then
-              sudo /usr/local/bin/wings --config /etc/pterodactyl/config.yml &
-              echo "Started wings manually"
-            fi
-          fi
-          # Restart Nginx
-          sudo systemctl restart nginx
+          # Generate config for wings (simplified, adjust as needed)
+          sudo mkdir -p /etc/pterodactyl
+          sudo tee /etc/pterodactyl/config.yml > /dev/null <<EOF
+          debug: false
+          uuid: "your-uuid-here"
+          token: "YOUR_WINGS_TOKEN"
+          api:
+            host: "http://localhost:8080"
+            port: 8080
+            ssl: false
+            upload_limit: 100
+          system:
+            data: "/srv/daemon-data"
+            sftp:
+              bind_port: 2022
+          allowed_mounts: []
+          remote: "ws://localhost:8080"
+          EOF
+          sudo docker run -d --name pterodactyl-wings -p 8081:8080 -v /etc/pterodactyl/config.yml:/etc/pterodactyl/config.yml -v /srv/daemon-data:/srv/daemon-data pterodactyl/wings:latest
 
       - name: Create Info Page for Website
         run: |
@@ -181,12 +172,8 @@ jobs:
               <p><strong>Password Panel:</strong> ashifaja123</p>
               <p><strong>Panel URL:</strong> <a href="http://panel.panelasip.my.id">panel.panelasip.my.id</a></p>
               <p><strong>Node URL:</strong> <a href="http://node.panel.my.id">node.panel.my.id</a></p>
-              <h2>Service Status:</h2>
-              <pre>$(sudo systemctl status pterodactyl-panel --no-pager -l 2>/dev/null || echo "Panel service not found")</pre>
-              <pre>$(sudo systemctl status wings --no-pager -l 2>/dev/null || echo "Wings service not found")</pre>
-              <pre>$(sudo systemctl status nginx --no-pager -l 2>/dev/null || echo "Nginx service not found")</pre>
-              <h2>Running Processes:</h2>
-              <pre>$(ps aux | grep -E "(pterodactyl|wings|nginx|php)" | head -20)</pre>
+              <h2>Docker Containers:</h2>
+              <pre>$(sudo docker ps -a)</pre>
               <h2>Ports in Use:</h2>
               <pre>$(sudo netstat -tlnp | grep -E ":(80|8080|8081) ")</pre>
           </body>
