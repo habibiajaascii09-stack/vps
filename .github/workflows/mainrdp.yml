@@ -1,108 +1,177 @@
-name: VPS and Setup Panel
+name: Panel & Wings
 
 on:
   workflow_dispatch:
     inputs:
-      tailscale_authkey:
-        description: 'Tailscale Auth Key'
+      ssh_password:
+        description: 'Masukkan Password SSH/SUDO (Wajib)'
         required: true
-        default: 'tskey-auth-~~~~~~~'
+        default: 'P@sswordAman123'
+      tailscale_authkey:
+        description: 'Tailscale Auth Key (Reusable - JANGAN GUNAKAN KEY YANG BOCOR)'
+        required: true
+        default: 'tskey-auth-...'
 
 jobs:
-  setup:
+  pterodactyl_full_install:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    env:
+      ADMIN_EMAIL: ashifaja123@gmail.com
+      ADMIN_PASSWORD: ashifaja123
+      PANEL_DOMAIN: panel.panelasip.my.id
+      NODE_DOMAIN: node.panelasip.my.id # Digunakan sebagai hostname Wings
+      
+      # Menggunakan input langsung (Anda sudah berhasil dengan ini)
+      TS_SECRET: ${{ github.event.inputs.tailscale_authkey }} 
+      DB_PASS: ${{ secrets.DB_PASSWORD }} # Pastikan SECRET ini ada
+      APP_PASS: ${{ secrets.APP_PASSWORD }} # Pastikan SECRET ini ada
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Checkout Kode
+        uses: actions/checkout@v4
 
-      - name: Install Tailscale
+      - name: Instal Prasyarat & Hapus Konflik Paket (Termasuk Apache)
+        env:
+          SSH_PASS: ${{ github.event.inputs.ssh_password }}
         run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey ${{ inputs.tailscale_authkey }} --hostname github-runner
-
-      - name: Get Tailscale IP
-        id: tailscale_ip
-        run: |
-          echo "TAILSCALE_IP=$(tailscale ip -4)" >> $GITHUB_ENV
-
-      - name: Install dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y curl wget gnupg2 software-properties-common
-
-      - name: Stop and Disable Apache2 (if exists)
-        run: |
+          echo "Memperbarui sistem & menginstal prasyarat..."
+          sudo apt update -y
+          
+          # --- PEMBERSIHAN PAKET KRITIS (Menyertakan Apache) ---
           sudo systemctl stop apache2 || true
           sudo systemctl disable apache2 || true
           sudo apt remove --purge apache2* -y || true
-
-      - name: Install Nginx
-        run: |
-          sudo apt install -y nginx
-          sudo systemctl start nginx
-          sudo systemctl enable nginx
-
-      - name: Configure Nginx for Pterodactyl Panel
-        run: |
-          sudo tee /etc/nginx/sites-available/panel.panelasip.my.id > /dev/null <<EOF
-          server {
-              listen 80;
-              server_name panel.panelasip.my.id;
-              location / {
-                  proxy_pass http://localhost:8080;
-                  proxy_set_header Host \$host;
-                  proxy_set_header X-Real-IP \$remote_addr;
-                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto \$scheme;
-              }
-          }
-          EOF
-          sudo ln -s /etc/nginx/sites-available/panel.panelasip.my.id /etc/nginx/sites-enabled/
-          sudo nginx -t
-          sudo systemctl restart nginx
-
-      - name: Configure Nginx for Pterodactyl Node
-        run: |
-          sudo tee /etc/nginx/sites-available/node.panel.my.id > /dev/null <<EOF
-          server {
-              listen 80;
-              server_name node.panel.my.id;
-              location / {
-                  proxy_pass http://localhost:8081;
-                  proxy_set_header Host \$host;
-                  proxy_set_header X-Real-IP \$remote_addr;
-                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto \$scheme;
-              }
-          }
-          EOF
-          sudo ln -s /etc/nginx/sites-available/node.panel.my.id /etc/nginx/sites-enabled/
-          sudo nginx -t
-          sudo systemctl restart nginx
-
-      - name: Install Docker (for Pterodactyl)
-        run: |
+          
+          # Pembersihan sisa konflik Docker/Containerd yang mungkin ada
+          sudo apt-get remove -y containerd docker.io || true
+          sudo apt-get purge -y containerd docker.io || true
+          sudo dpkg --configure -a || true
+          sudo apt install -f -y || true 
+          sudo apt autoremove -y 
+          sudo apt clean
+          
+          echo "--- INSTALASI UTAMA ---"
+          
+          # Instalasi Docker resmi
           curl -fsSL https://get.docker.com -o get-docker.sh
           sudo sh get-docker.sh
-          sudo systemctl start docker
-          sudo systemctl enable docker
+          
+          # Instalasi SSH Server, Nginx, dan Prasyarat Pterodactyl
+          # Nginx diinstal di sini, tapi konfigurasinya diserahkan ke skrip Pterodactyl
+          sudo apt install -y openssh-server nginx net-tools curl sshpass git zip unzip php-cli php-zip
+          
+          # Pengaturan User SSH
+          echo "runner:${{ env.SSH_PASS }}" | sudo chpasswd
+          sudo usermod -aG docker runner
+          sudo systemctl start ssh
+          sudo systemctl enable ssh
+          
+          echo "Prasyarat dan Docker Stabil siap."
 
-      - name: Install Pterodactyl Panel
+      - name: Hubungkan ke Tailscale & Dapatkan IP
+        id: ts_setup
         run: |
-          curl -sSL https://pterodactyl-installer.sebastian-lehrbach.de/ | sudo bash -s -- --panel-only --email ashifaja123@gmail.com --password ashifaja123 --hostname panel.panelasip.my.id --port 8080
+          set -e
+          if [ -z "${{ env.TS_SECRET }}" ]; then 
+            echo "::error::Auth Key Tailscale tidak diset. Proses gagal."
+            exit 1
+          fi
+          
+          echo "Menginstal dan menghubungkan Tailscale..."
+          curl -fsSL https://tailscale.com/install.sh | sh
+          
+          # Koneksi menggunakan Auth Key dari input
+          sudo tailscale up --authkey "${{ env.TS_SECRET }}" --ssh || true
 
-      - name: Install Pterodactyl Wings (Node)
-        run: |
-          curl -sSL https://pterodactyl-installer.sebastian-lehrbach.de/ | sudo bash -s -- --wings-only --panel-url https://panel.panelasip.my.id --token YOUR_WINGS_TOKEN --hostname node.panel.my.id --port 8081
+          # Mencari IP Tailscale (IPv4)
+          TS_IP=""
+          for i in {1..10}; do
+              TS_IP=$(sudo tailscale ip -4 | head -n1)
+              if [ -n "$TS_IP" ]; then
+                  break
+              fi
+              sleep 2
+          done
+          
+          if [ -z "$TS_IP" ]; then
+              echo "::error::Gagal mendapatkan IP Tailscale. Proses gagal."
+              exit 1
+          fi
 
-      - name: Output Information
-        run: |
-          echo "IP VPS: ${{ env.TAILSCALE_IP }}"
-          echo "VPS Password: (Default Ubuntu runner, no password set)"
-          echo "Akun Panel: ashifaja123@gmail.com"
-          echo "Password Panel: ashifaja123"
+          echo "IP Tailscale didapatkan: $TS_IP"
+          echo "ts_ip=$TS_IP" >> $GITHUB_OUTPUT
 
-      - name: Keep Runner Running for 6 Hours
+      - name: Instalasi Pterodactyl Panel (Membuat Konfig Nginx yang Benar)
+        env:
+          FQDN: ${{ env.PANEL_DOMAIN }}
         run: |
-          echo "Runner akan berjalan terus selama 6 jam..."
-          sleep 21600  # 6 jam dalam detik
+          echo "Menjalankan instalasi Panel SAJA (Resmi). Skrip ini akan membuat Nginx V-Host yang benar."
+          
+          # Menggunakan skrip resmi Pterodactyl V2.x
+          sudo wget -qO install.sh https://raw.githubusercontent.com/pterodactyl/installation-script/master/install.sh
+          sudo chmod +x install.sh
+          
+          # Skrip ini akan mengurus PHP, MariaDB, Composer, dan KONFIGURASI NGINX secara internal
+          sudo ./install.sh --panel --db-password $DB_PASS --app-password $APP_PASS --fqdn $FQDN
+          
+          echo "Instalasi Panel Selesai. Nginx dikonfigurasi."
+      
+      # PENTING: Langkah ini harus dihilangkan karena tidak bisa dijalankan tanpa token Wings yang valid dari Panel
+      # - name: Install Pterodactyl Wings (Node)
+      #   run: |
+      #     echo "Instalasi Wings dibatalkan karena memerlukan token yang harus diambil dari Panel yang sudah terinstal."
+      
+      - name: Buat Akun Admin dengan Kredensial Spesifik
+        run: |
+          echo "Membuat akun admin dengan kredensial tetap..."
+          PANEL_PATH="/var/www/pterodactyl"
+          
+          if [ ! -d "$PANEL_PATH" ]; then
+              echo "::error::Direktori Pterodactyl ($PANEL_PATH) tidak ditemukan. Instalasi Panel GAGAL."
+              exit 1
+          fi
+          
+          cd $PANEL_PATH
+          
+          php artisan p:user:make \
+            --email="${{ env.ADMIN_EMAIL }}" \
+            --name="AdminPanel" \
+            --username="admin" \
+            --password="${{ env.ADMIN_PASSWORD }}" \
+            --admin || true
+            
+          echo "Akun admin dibuat: ${{ env.ADMIN_EMAIL }} / ${{ env.ADMIN_PASSWORD }}"
+
+      - name: Final Output & Restart Nginx
+        env:
+          FQDN: ${{ env.PANEL_DOMAIN }}
+          TS_IP: ${{ steps.ts_setup.outputs.ts_ip }}
+        run: |
+          # Restart Nginx untuk memastikan V-Host Pterodactyl yang baru di-load
+          sudo systemctl restart nginx
+          
+          echo "================================================"
+          echo "      PTERODACTYL PANEL - AKSES SIAP"
+          echo "================================================"
+          echo "WAKTU AKTIF: ~6 JAM"
+          echo ""
+          echo "1. AKSES PANEL (Via Tailscale):"
+          echo "   URL: http://${{ env.PANEL_DOMAIN }}"
+          echo "   URL (Fallback IP Tailscale): http://${{ env.TS_IP }}"
+          echo "   (Ini seharusnya tidak lagi menunjukkan 'Welcome to Nginx')"
+          echo ""
+          echo "2. KREDENSIAL ADMIN (Panel):"
+          echo "   Email: ${{ env.ADMIN_EMAIL }}"
+          echo "   Password: ${{ env.ADMIN_PASSWORD }}"
+          echo "   (Username: admin)"
+          echo ""
+          echo "3. AKSES SSH (Via Tailscale):"
+          echo "   SSH User: runner"
+          echo "   SSH Pass: ${{ github.event.inputs.ssh_password }}"
+          echo "   Command: ssh runner@${{ env.TS_IP }}"
+          echo ""
+          echo "================================================"
+          echo "Panel Pterodactyl sudah siap. Menunggu 350 menit..."
+          sleep 21000
