@@ -1,0 +1,163 @@
+name: Pterodactyl Panel (Panel Only, No Wings)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tailscale_authkey_needed:
+        description: 'Pastikan Secret TAILSCALE_AUTHKEY sudah diset di repo'
+        required: false
+
+jobs:
+  pterodactyl_panel_only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 # Maksimum waktu berjalan di GitHub
+
+    env:
+      ADMIN_EMAIL: ashifaja123@gmail.com
+      ADMIN_PASSWORD: ashifaja123
+      PANEL_DOMAIN: panel.panelasip.my.id
+      NODE_DOMAIN: node.panelasip.my.id
+
+    steps:
+      - name: Checkout Kode
+        uses: actions/checkout@v4
+
+      - name: Instal Tailscale dan Koneksi (Perlu Secret TAILSCALE_AUTHKEY)
+        id: ts_setup
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          set -e
+          if [ -z "$TS_AUTHKEY" ]; then
+            echo "::error::Secret TAILSCALE_AUTHKEY tidak diset. Proses gagal."
+            exit 1
+          fi
+          
+          echo "Menginstal Tailscale..."
+          curl -fsSL https://tailscale.com/install.sh | sh
+          
+          echo "Menghubungkan ke Tailscale..."
+          sudo tailscale up --authkey "$TS_AUTHKEY" --ssh || true
+
+          # Mencari IP Tailscale (IPv4)
+          TS_IP=""
+          for i in {1..10}; do
+              TS_IP=$(sudo tailscale ip -4 | head -n1)
+              if [ -n "$TS_IP" ]; then
+                  break
+              fi
+              sleep 2
+          done
+          
+          if [ -z "$TS_IP" ]; then
+              echo "::error::Gagal mendapatkan IP Tailscale. Proses gagal."
+              exit 1
+          fi
+
+          echo "IP Tailscale didapatkan: $TS_IP"
+          echo "ts_ip=$TS_IP" >> $GITHUB_OUTPUT
+
+      - name: Instal SSH, Nginx, Hapus Konflik Paket & Docker (Prasyarat Panel)
+        env:
+          SSH_PASS: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          echo "Memperbarui sistem..."
+          sudo apt update -y
+          
+          # --- LANGKAH WAJIB: PEMBERSIHAN DAN PERBAIKAN PAKET KRUSIAL ---
+          echo "Memperbaiki Konflik dan Menghapus containerd yang konflik (Anti-Bug)..."
+          sudo apt clean
+          sudo apt autoremove -y
+          sudo dpkg --configure -a
+          sudo apt install -f -y 
+          
+          # Hapus containerd lama yang bentrok (Solusi anti-bug)
+          sudo apt-get remove -y containerd || true
+          sudo apt-get purge -y containerd || true
+          
+          # --- Instalasi Prasyarat Utama (Termasuk Docker, walaupun Wings tidak diinstal) ---
+          # Docker tetap dibutuhkan karena skrip instalasi Pterodactyl sering memeriksanya.
+          echo "Menginstal SSH Server, Nginx, dan Docker..."
+          sudo apt install -y openssh-server sshpass nginx net-tools wget curl unzip docker.io
+          
+          # Pengaturan User dan Service
+          echo "runner:$SSH_PASS" | sudo chpasswd
+          
+          sudo systemctl start ssh
+          sudo systemctl enable ssh
+          sudo systemctl start nginx
+          
+          echo "Semua prasyarat telah siap."
+
+      - name: Instalasi Pterodactyl Panel SAJA
+        env:
+          DB_PASS: ${{ secrets.DB_PASSWORD }}
+          APP_PASS: ${{ secrets.APP_PASSWORD }}
+          FQDN: ${{ env.PANEL_DOMAIN }}
+        run: |
+          echo "Menjalankan instalasi Panel SAJA. Proses akan memakan waktu 10-20 menit..."
+          
+          # Download skrip instalasi Pterodactyl
+          sudo wget -qO install.sh https://raw.githubusercontent.com/pterodactyl/installation-script/master/install.sh
+          sudo chmod +x install.sh
+          
+          # Jalankan skrip utama, HANYA --panel.
+          # Skrip akan menggunakan FQDN (panel.panelasip.my.id)
+          sudo ./install.sh --panel --db-password $DB_PASS --app-password $APP_PASS --fqdn $FQDN
+          
+          echo "Instalasi Panel Selesai."
+          
+      - name: Buat Akun Admin dengan Kredensial Spesifik
+        run: |
+          echo "Membuat akun admin dengan kredensial tetap..."
+          PANEL_PATH="/var/www/pterodactyl"
+          cd $PANEL_PATH
+          
+          # Skrip ini menjalankan perintah pembuatan user dengan kredensial yang diminta
+          php artisan p:user:make \
+            --email="${{ env.ADMIN_EMAIL }}" \
+            --name="AdminPanel" \
+            --username="admin" \
+            --password="${{ env.ADMIN_PASSWORD }}" \
+            --admin || true
+            
+          echo "Akun admin dibuat: ${{ env.ADMIN_EMAIL }} / ${{ env.ADMIN_PASSWORD }}"
+
+      - name: Konfigurasi Nginx untuk Domain Panel
+        env:
+          FQDN: ${{ env.PANEL_DOMAIN }}
+        run: |
+          echo "Mengkonfigurasi Nginx untuk ${FQDN}..."
+          
+          # Skrip instalasi Pterodactyl sudah mengkonfigurasi Nginx,
+          # kita hanya perlu memastikan service berjalan dan tidak ada konflik.
+          sudo systemctl restart nginx || true
+          echo "Nginx dikonfigurasi dan di-restart."
+
+      - name: Final Output & Tahan Pekerjaan (6 Jam)
+        run: |
+          TS_IP="${{ steps.ts_setup.outputs.ts_ip }}"
+          
+          echo "================================================"
+          echo "      PTERODACTYL PANEL - AKSES SIAP"
+          echo "================================================"
+          echo "WAKTU AKTIF: ~6 JAM"
+          echo ""
+          echo "1. AKSES PANEL (Via Tailscale atau DNS):"
+          echo "   URL: http://${{ env.PANEL_DOMAIN }}"
+          echo "   URL (Fallback IP Tailscale): http://$TS_IP"
+          echo ""
+          echo "2. KREDENSIAL ADMIN (Panel):"
+          echo "   Email: ${{ env.ADMIN_EMAIL }}"
+          echo "   Password: ${{ env.ADMIN_PASSWORD }}"
+          echo "   (Username: admin)"
+          echo ""
+          echo "3. AKSES SSH (Via Tailscale):"
+          echo "   SSH User: runner"
+          echo "   SSH Pass: ${{ secrets.SSH_PASSWORD }}"
+          echo "   Command: ssh runner@$TS_IP"
+          echo ""
+          echo "================================================"
+          echo "Panel Pterodactyl sudah siap, tapi TIDAK ADA WINGS (Server Game)."
+          echo "Silakan akses sekarang. Menunggu 350 menit..."
+          sleep 21000
