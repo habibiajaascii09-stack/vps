@@ -1,4 +1,4 @@
-name: Pterodactyl Panel (Instalasi MANUAL - Paling Stabil)
+name: Pterodactyl Panel (Instalasi MANUAL - FIX PERMISSION)
 
 on:
   workflow_dispatch:
@@ -26,32 +26,31 @@ jobs:
       DB_PASS: ${{ secrets.DB_PASSWORD }} 
       APP_PASS: ${{ secrets.APP_PASSWORD }} 
       
-      # Path instalasi Pterodactyl
       PANEL_PATH: /var/www/pterodactyl
+      RUNNER_USER: runner # User yang menjalankan job
 
     steps:
       - name: Checkout Kode
         uses: actions/checkout@v4
 
-      - name: Instal Prasyarat, Hapus Konflik, & Setting SSH/Docker
+      - name: Instal Prasyarat, Fix Konflik, & Setting SSH/Docker
         env:
           SSH_PASS: ${{ github.event.inputs.ssh_password }}
         run: |
           echo "Memperbarui sistem & menginstal prasyarat dasar..."
           sudo apt update -y
           
-          # --- PEMBERSIHAN KRITIS (Apache & Docker Lama) ---
+          # --- PEMBERSIHAN KRITIS ---
           sudo systemctl stop apache2 || true
           sudo systemctl disable apache2 || true
           sudo apt remove --purge apache2* -y || true
           sudo apt-get remove -y containerd docker.io || true
           sudo apt-get purge -y containerd docker.io || true
           
-          # --- INSTALASI DEPENDENCY MANUAL (Pencegahan Exit Code 8) ---
+          # --- INSTALASI DEPENDENCY MANUAL ---
           sudo add-apt-repository -y ppa:ondrej/php
           sudo apt update
           
-          # Menginstal semua paket yang dibutuhkan Pterodactyl Panel secara eksplisit
           sudo apt install -y curl nginx mariadb-server redis-server composer unzip git
           sudo apt install -y php8.1-cli php8.1-fpm php8.1-mysql php8.1-zip php8.1-gd php8.1-mbstring php8.1-curl php8.1-xml php8.1-bcmath php8.1-redis
           
@@ -60,8 +59,8 @@ jobs:
           sudo sh get-docker.sh
           
           # Pengaturan User SSH
-          echo "runner:${{ env.SSH_PASS }}" | sudo chpasswd
-          sudo usermod -aG docker runner
+          echo "${{ env.RUNNER_USER }}:${{ env.SSH_PASS }}" | sudo chpasswd
+          sudo usermod -aG docker ${{ env.RUNNER_USER }}
           sudo systemctl start ssh
           sudo systemctl enable ssh
           
@@ -70,6 +69,7 @@ jobs:
       - name: Hubungkan ke Tailscale & Dapatkan IP
         id: ts_setup
         run: |
+          # (Langkah Tailscale ini sudah terbukti berhasil, tidak diubah)
           set -e
           if [ -z "${{ env.TS_SECRET }}" ]; then 
             echo "::error::Auth Key Tailscale tidak diset. Proses gagal."
@@ -98,35 +98,42 @@ jobs:
           echo "IP Tailscale didapatkan: $TS_IP"
           echo "ts_ip=$TS_IP" >> $GITHUB_OUTPUT
 
-      - name: Instalasi Pterodactyl Panel (Manual Langkah 1 - Aplikasi)
+      - name: Instalasi Pterodactyl Panel (Manual Langkah 1 - Aplikasi & Izin)
         run: |
-          echo "Memulai instalasi Panel secara manual..."
+          echo "Memulai instalasi Panel secara manual & mengoreksi izin..."
           
-          # 1. Buat direktori dan unduh aplikasi
+          # 1. Buat direktori (oleh root)
           sudo mkdir -p ${{ env.PANEL_PATH }}
+          
+          # PERBAIKAN KRITIS: Ubah kepemilikan ke user 'runner' agar bisa menulis file!
+          sudo chown -R ${{ env.RUNNER_USER }}:${{ env.RUNNER_USER }} ${{ env.PANEL_PATH }}
+          
           cd ${{ env.PANEL_PATH }}
           
+          # 2. Unduh aplikasi (sekarang user 'runner' bisa menulis)
           curl -Lo panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
-          sudo tar -xzvf panel.tar.gz
-          sudo chmod -R 755 storage/* bootstrap/cache/
           
-          # 2. Instalasi Composer
+          # 3. Ekstrak dan atur izin
+          tar -xzvf panel.tar.gz
+          chmod -R 755 storage/* bootstrap/cache/
+          
+          # 4. Instalasi Composer
           sudo composer install --no-dev --optimize-autoloader
           
-          # 3. Konfigurasi Environment & Database
+          # 5. Konfigurasi Environment & Database (butuh sudo untuk akses database & php artisan)
           sudo cp .env.example .env
           sudo php artisan key:generate --force
           
           # Atur file .env
           sudo sed -i 's/DB_PASSWORD=/DB_PASSWORD=${{ env.DB_PASS }}/g' .env
           sudo sed -i 's/APP_URL=http:\/\/localhost/APP_URL=http:\/\/${{ env.PANEL_DOMAIN }}/g' .env
-          sudo sed -i 's/APP_ENV=production/APP_ENV=local/g' .env # Agar error lebih detail jika ada masalah
+          sudo sed -i 's/APP_ENV=production/APP_ENV=local/g' .env
           
-          # 4. Inisiasi Database
+          # 6. Inisiasi Database
           sudo mysql -u root -e "CREATE DATABASE IF NOT EXISTS panel;" || true
           sudo php artisan migrate --force
-          
-          # 5. Konfigurasi Redis & Cache
+
+          # 7. Konfigurasi Redis & Cache
           sudo php artisan p:environment:mail
           sudo php artisan p:environment:database --host=127.0.0.1 --port=3306 --database=panel --username=root --password='${{ env.DB_PASS }}'
           sudo php artisan p:environment:redis --host=127.0.0.1 --port=6379 --database=0
@@ -145,8 +152,8 @@ jobs:
             --password="${{ env.ADMIN_PASSWORD }}" \
             --admin || true
             
-          # 2. Setting File Permission Final
-          sudo chown -R www-data:www-data ${{ env.PANEL_PATH }}/*
+          # 2. Setting File Permission Final ke www-data (untuk webserver Nginx)
+          sudo chown -R www-data:www-data ${{ env.PANEL_PATH }}
           
           # 3. Queue Worker (Menggunakan supervisor)
           sudo apt install -y supervisor
@@ -175,7 +182,7 @@ jobs:
           # Hapus konfigurasi default Nginx
           sudo rm -f /etc/nginx/sites-enabled/default
           
-          # Buat konfigurasi Nginx untuk Panel
+          # Buat konfigurasi Nginx untuk Panel (Menggunakan php8.1-fpm.sock)
           sudo tee /etc/nginx/sites-available/pterodactyl.conf > /dev/null <<EOF
           server {
               listen 80;
@@ -223,12 +230,12 @@ jobs:
           echo "================================================"
           echo "  PTERODACTYL PANEL - INSTALASI MANUAL SUKSES!"
           echo "================================================"
-          echo "WAKTU AKTIF: ~5.8 JAM" 
+          echo "WAKTU AKTIF: ~5.8 JAM"
           echo ""
           echo "1. AKSES PANEL (Via Tailscale):"
           echo "   URL: http://${{ env.FQDN }}"
           echo "   URL (Fallback IP Tailscale): http://${{ env.TS_IP }}"
-          echo "   MASALAH NGINX DIPERBAIKI. Halaman login Panel sudah siap."
+          echo "   SEMUA MASALAH SUDAH DI-FIX. Halaman login Panel harusnya muncul."
           echo ""
           echo "2. KREDENSIAL ADMIN (Panel):"
           echo "   Email: ${{ env.ADMIN_EMAIL }}"
