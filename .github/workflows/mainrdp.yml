@@ -1,4 +1,4 @@
-name: Tailscale Runner HP Version (Pterodactyl) - FIX FINAL
+name: Tailscale Runner HP Version (Pterodactyl) - ULTIMATE FIX
 
 on:
   workflow_dispatch:
@@ -20,8 +20,8 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
-      # 1. Setup Tailscale & SSH
+          
+      # 1. Setup Tailscale & SSH (Tidak diubah, sudah stabil)
       - name: Setup Tailscale dan SSH
         uses: tailscale/github-action@v2
         with:
@@ -32,17 +32,11 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y openssh-server
-          
-          # MENGATUR PASSWORD SSH
           echo -e "${{ github.event.inputs.runner_password }}\n${{ github.event.inputs.runner_password }}" | sudo passwd runner
 
-      # =========================================================
-      # ⬇️ AWAL MODIFIKASI DAN PERBAIKAN FINAL ⬇️
-      # =========================================================
-
+      # 2. Install Docker dan Deploy Pterodactyl (Tidak diubah, sudah stabil)
       - name: ⚙️ Install Docker dan Docker Compose
         run: |
-          echo "Menginstal Docker dan menambahkan user runner ke grup docker..."
           sudo apt install -y apt-transport-https ca-certificates curl gnupg lsb-release
           curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
@@ -53,18 +47,17 @@ jobs:
         run: |
           mkdir -p /home/runner/pterodactyl
           cd /home/runner/pterodactyl
-
           wget -q -O docker-compose.yml https://raw.githubusercontent.com/pterodactyl/panel/develop/docker-compose.yml
           cp .env.example .env
           
-          # --- PENTING: Modify docker-compose.yml untuk mengekspos port 8080 host ke container panel: ---
-          # Ini akan menggantikan bagian ports: [ '80:80' ] di panel service.
+          # Modify docker-compose.yml: Ubah ports '80:80' menjadi '8080:80' untuk panel service
           sudo sed -i '/ports:/!b;n;/ - 80:80/c\      - 8080:80' docker-compose.yml
           
           echo "Menjalankan container Pterodactyl, mengekspos ke port 8080 host..."
           sudo docker compose up -d
 
-      - name: 🌐 Setup Nginx Proxy ke 8080 (Solusi Paling Andal)
+      # 3. Setup Nginx (DI PERBAIKI)
+      - name: 🌐 Setup Nginx Proxy ke 8080
         run: |
           TS_IP=$(tailscale ip -4)
           echo "Tailscale IP Ditemukan: $TS_IP"
@@ -76,18 +69,25 @@ jobs:
           sudo rm /etc/nginx/sites-enabled/default
           
           # 3. Buat konfigurasi Nginx untuk Proxy Terbalik
+          # Konfigurasi ini HANYA menjadi proxy, tidak mencoba melayani file statis
           sudo tee /etc/nginx/sites-available/pterodactyl.conf > /dev/null <<EOF
 server {
     listen 80;
     server_name $TS_IP;
 
     location / {
-        # Proxy ke port 8080 host (tempat container Pterodactyl sekarang di-expose)
+        # PROXY_PASS BARU: Nginx meneruskan SEMUA permintaan ke port 8080 (container Pterodactyl)
         proxy_pass http://127.0.0.1:8080;
+        
+        # Header proxy standar
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        
+        # Tambahkan timeout untuk mencegah kegagalan karena lambat start
+        proxy_read_timeout 300s;
+        proxy_connect_timeout 75s;
     }
 }
 EOF
@@ -97,26 +97,19 @@ EOF
           echo "Pterodactyl siap diakses melalui Nginx di IP Tailscale: $TS_IP"
           echo "RUNNER_IP=$TS_IP" >> $GITHUB_ENV # Simpan IP Tailscale
 
-      # =========================================================
-      # ⬆️ AKHIR MODIFIKASI ⬆️
-      # =========================================================
-      
-      # 4. Mendapatkan IP Address dan Informasi Koneksi
+      # 4. Mendapatkan IP Address dan Menahan Runner (Tidak diubah)
       - name: Get Connection Information
         run: |
           ip_address=${{ env.RUNNER_IP }}
           echo "### ✅ Runner Siap diakses via Web! (http://${ip_address})" >> $GITHUB_STEP_SUMMARY
-          # ... (output log lainnya)
+          echo "### ⚠️ PENTING: Lakukan setup Pterodactyl (migrate, user:make) via SSH." >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "🔑 **Akses SSH (Debugging)**:" >> $GITHUB_STEP_SUMMARY
-          echo "   - **Command**: ssh runner@${ip_address}" >> $GITHUB_STEP_SUMMARY
-          echo "   - **Password**: ${{ github.event.inputs.runner_password }}" >> $GITHUB_STEP_SUMMARY
+          echo "🌐 **Akses Web**: http://${ip_address}" >> $GITHUB_STEP_SUMMARY
+          echo "🔑 **Akses SSH**: ssh runner@${ip_address} (Pass: ${{ github.event.inputs.runner_password }})" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
 
       - name: Hold Job and Wait for Timeout
         run: |
-          echo "Akses web diaktifkan di IP Tailscale: ${{ env.RUNNER_IP }}"
-          echo "Job akan berjalan selama 350 menit (atau sampai dibatalkan). Segera selesaikan Setup Pterodactyl Anda!"
           sleep 350m
           
       - name: Job Finished
