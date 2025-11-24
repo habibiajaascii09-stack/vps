@@ -7,7 +7,7 @@ on:
         description: 'Tailscale Auth Key'
         required: true
       ssh_password_key:
-        description: 'SSH Password Key'
+        description: 'SSH Password'
         required: true
 
 jobs:
@@ -19,14 +19,16 @@ jobs:
       uses: actions/checkout@v2
 
     - name: Run VPS Setup Script
-      env:
-        TAILSCALE_KEY: ${{ github.event.inputs.tailscale_key }}
-        SSH_PASSWORD_KEY: ${{ github.event.inputs.ssh_password_key }}
-        SSH_PRIVATE_KEY: |
-          -----BEGIN OPENSSH PRIVATE KEY-----
-          your-ssh-private-key
-          -----END OPENSSH PRIVATE KEY-----
       run: |
+        # Menyimpan input dari workflow ke variabel
+        TAILSCALE_KEY="${{ github.event.inputs.tailscale_key }}"
+        SSH_PASSWORD_KEY="${{ github.event.inputs.ssh_password_key }}"
+        SSH_PRIVATE_KEY="\
+        -----BEGIN OPENSSH PRIVATE KEY-----
+        your-ssh-private-key
+        -----END OPENSSH PRIVATE KEY-----"
+
+        # Menyimpan SSH Key
         echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
 
