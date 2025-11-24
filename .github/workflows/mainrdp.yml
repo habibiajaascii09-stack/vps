@@ -1,29 +1,93 @@
-      - name: ⏳ Siapkan Lingkungan dan Install Tailscale (Diperbaiki)
+name: Deploy VPS Sementara via SSH dan Tailscale
+
+# Trigger workflow secara manual
+on:
+  workflow_dispatch:
+    inputs:
+      tailscale_auth_key:
+        description: 'Kunci Otorisasi Tailscale (Dibutuhkan untuk terhubung ke Tailnet Anda)'
+        required: true # Kunci wajib diisi
+        default: ''
+
+jobs:
+  vps_runner:
+    # Menggunakan runner Ubuntu terbaru
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: ⏳ Siapkan Lingkungan dan Install Tailscale
         run: |
+          echo "Memulai instalasi Tailscale dan SSH..."
+          
           # Perbarui dan Install Kebutuhan Dasar
           sudo apt update
-          sudo apt install -y curl wget openssh-server
+          # Pastikan curl, openssh-server, dan gpg sudah terinstal
+          sudo apt install -y curl wget openssh-server gpg
 
-          # --- PERBAIKAN GPG ERROR DIMULAI DI SINI ---
-          # 1. Unduh kunci publik Tailscale dan simpan di /usr/share/keyrings/
-          #    Menggunakan metode yang lebih modern untuk memastikan kunci dikenali oleh APT.
+          # --- PERBAIKAN GPG ERROR: Memastikan Kunci Repositori Tailscale Terverifikasi ---
+          # 1. Unduh kunci publik Tailscale dan simpan sebagai binary keyring
           curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.no-tarsnap.gpg | \
           sudo gpg --dearmor -o /usr/share/keyrings/tailscale-archive-keyring.gpg
           
-          # 2. Tambahkan repositori, merujuk langsung ke keyring baru
+          # 2. Tambahkan repositori, merujuk langsung ke keyring yang sudah diverifikasi
           echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu jammy main" | \
           sudo tee /etc/apt/sources.list.d/tailscale.list > /dev/null
+          # --- AKHIR PERBAIKAN GPG ERROR ---
           
-          # --- PERBAIKAN GPG ERROR SELESAI DI SINI ---
-          
-          # Lanjutkan Instalasi
+          # Lanjutkan Instalasi Tailscale
           sudo apt update
           sudo apt install -y tailscale
 
           # Otentikasi Tailscale dengan Kunci yang Diberikan
-          echo "Melakukan Otentikasi Tailscale..."
+          echo "Melakukan Otentikasi Tailscale dengan Kunci yang Diberikan..."
           sudo tailscale up --authkey=${{ github.event.inputs.tailscale_auth_key }} --ssh
           
-          # Dapatkan IP Tailscale
+          # Dapatkan IP Tailscale dan simpan sebagai variabel lingkungan
           TS_IP=$(tailscale ip -4)
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: 🔐 Buat User dan Password SSH
+        run: |
+          # Pengaturan user dan pembuatan password acak
+          VPS_USER="vpsuser"
+          # Membuat password acak
+          VPS_PASSWORD=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 12 | head -n 1)
+          
+          # Membuat user baru tanpa password awal
+          sudo adduser --disabled-password --gecos "" $VPS_USER
+          # Mengatur password
+          echo "$VPS_USER:$VPS_PASSWORD" | sudo chpasswd
+          # Menambahkan user ke grup sudo
+          sudo usermod -aG sudo $VPS_USER
+          
+          # Catat password untuk output log
+          echo "VPS_PASSWORD=$VPS_PASSWORD" >> $GITHUB_ENV
+
+      - name: 🔑 Catat Informasi Akses dan Tutorial SSH
+        run: |
+          echo "================================================="
+          echo "      ✨ Informasi Akses VPS (SSH) Tersedia! ✨"
+          echo "================================================="
+          echo "Alamat IP Tailscale: ${{ env.TAILSCALE_IP }}"
+          echo "Username SSH: **vpsuser**"
+          echo "Password SSH: **${{ env.VPS_PASSWORD }}**"
+          echo ""
+          echo "📢 Tutorial Akses (Menggunakan Juicessh atau SSH Client lain):"
+          echo "1. Pastikan perangkat yang Anda gunakan sudah terinstal **Tailscale** dan ter-Otorisasi di jaringan yang sama dengan VPS ini."
+          echo "2. Buka klien SSH Anda (misalnya Juicessh)."
+          echo "3. Buat koneksi SSH baru dengan detail berikut:"
+          echo "   - **Host/Alamat**: ${{ env.TAILSCALE_IP }}"
+          echo "   - **Port**: 22"
+          echo "   - **Username**: vpsuser"
+          echo "   - **Password**: ${{ env.VPS_PASSWORD }}"
+          echo "4. Klik Connect! Jika diminta, terima kunci host SSH."
+          echo "================================================="
+          
+      - name: 🕒 Jaga Runner Tetap Aktif Selama 6 Jam
+        run: |
+          echo "Runner akan tetap berjalan selama 6 jam (360 menit)."
+          echo "Waktu mulai: $(date)"
+          # Menjaga runner tetap berjalan selama 360 menit (6 jam)
+          sleep 360m
+          echo "Waktu habis: $(date)"
+          echo "Runner akan dimatikan. Koneksi SSH Anda akan terputus."
