@@ -6,6 +6,9 @@ on:
       tailscale_key:
         description: 'Tailscale Auth Key'
         required: true
+      ssh_password_key:
+        description: 'SSH Password Key'
+        required: true
 
 jobs:
   deploy:
@@ -18,6 +21,7 @@ jobs:
     - name: Run VPS Setup Script
       env:
         TAILSCALE_KEY: ${{ github.event.inputs.tailscale_key }}
+        SSH_PASSWORD_KEY: ${{ github.event.inputs.ssh_password_key }}
         SSH_PRIVATE_KEY: |
           -----BEGIN OPENSSH PRIVATE KEY-----
           your-ssh-private-key
@@ -27,7 +31,7 @@ jobs:
         chmod 600 ~/.ssh/id_rsa
 
         # Menjalankan perintah di VPS
-        ssh -o StrictHostKeyChecking=no user@your-vps-ip << 'EOF'
+        sshpass -p "$SSH_PASSWORD_KEY" ssh -o StrictHostKeyChecking=no user@your-vps-ip << 'EOF'
           # Install Tailscale
           curl -fsSL https://tailscale.com/install.sh | sh
           tailscale up --authkey=$TAILSCALE_KEY
@@ -44,6 +48,7 @@ jobs:
         
           # Tampilkan informasi sebelum tidur
           echo "IP VPS: your-vps-ip"
+          echo "VPS Password: your_vps_password"
           echo "Panel Login: ashifaja123@gmail.com"
           echo "Panel Password: ashifaja123"
         
