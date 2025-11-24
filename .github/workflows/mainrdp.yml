@@ -27,7 +27,10 @@ jobs:
         -----BEGIN OPENSSH PRIVATE KEY-----
         your-ssh-private-key
         -----END OPENSSH PRIVATE KEY-----"
-
+        
+        # Membuat direktori .ssh jika belum ada
+        mkdir -p ~/.ssh
+        
         # Menyimpan SSH Key
         echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
