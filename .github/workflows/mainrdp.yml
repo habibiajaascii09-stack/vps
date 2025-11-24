@@ -6,7 +6,7 @@ on:
     inputs:
       tailscale_auth_key:
         description: 'Kunci Otorisasi Tailscale (Dibutuhkan untuk terhubung ke Tailnet Anda)'
-        required: true # Kunci wajib diisi
+        required: true
         default: ''
 
 jobs:
@@ -24,15 +24,15 @@ jobs:
           # Pastikan curl, openssh-server, dan gpg sudah terinstal
           sudo apt install -y curl wget openssh-server gpg
 
-          # --- PERBAIKAN GPG ERROR: Memastikan Kunci Repositori Tailscale Terverifikasi ---
-          # 1. Unduh kunci publik Tailscale dan simpan sebagai binary keyring
-          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.no-tarsnap.gpg | \
+          # --- PERBAIKAN FINAL GPG/404 ERROR ---
+          # 1. Unduh Kunci Publik GPG yang disederhanakan
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.key | \
           sudo gpg --dearmor -o /usr/share/keyrings/tailscale-archive-keyring.gpg
           
-          # 2. Tambahkan repositori, merujuk langsung ke keyring yang sudah diverifikasi
+          # 2. Tambahkan Repositori
           echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu jammy main" | \
           sudo tee /etc/apt/sources.list.d/tailscale.list > /dev/null
-          # --- AKHIR PERBAIKAN GPG ERROR ---
+          # --- AKHIR PERBAIKAN ---
           
           # Lanjutkan Instalasi Tailscale
           sudo apt update
