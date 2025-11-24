@@ -1,90 +1,63 @@
-name: Deploy VPS Sementara via SSH dan Tailscale
+name: Tailscale Runner HP Version (Max 6 Hours)
 
 # Trigger workflow secara manual dengan input
 on:
   workflow_dispatch:
     inputs:
-      # Kunci Otorisasi Tailscale dimasukkan di sini (seperti di gambar)
+      # INPUT BARU untuk Kunci Otorisasi Tailscale (sesuai gambar)
       tailscale_auth_key:
         description: 'Kunci Otorisasi Tailscale'
         required: true
         default: ''
+      # INPUT BARU untuk Password SSH Runner
+      runner_password:
+        description: 'Password untuk User SSH Runner (Perhatian: terlihat di log)'
+        required: true
+        default: 'vpspass123' # Ganti dengan password yang Anda inginkan
 
 jobs:
   temporary-vps-access:
     runs-on: ubuntu-latest
-    # Timeout disetel ke 350 menit (maksimum yang diizinkan untuk GitHub runner)
     timeout-minutes: 350 
 
     steps:
-      - name: ⏳ Siapkan Lingkungan dan Install Tailscale
-        run: |
-          echo "Memulai instalasi Tailscale dan SSH..."
-          
-          # Perbarui dan Install Kebutuhan Dasar
-          sudo apt update
-          sudo apt install -y curl wget openssh-server gpg
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-          # --- INSTALASI TAILSCALE MENGGUNAKAN METODE MANUAL YANG STABIL ---
-          # 1. Unduh Kunci Publik GPG
-          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.key | \
-          sudo gpg --dearmor -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+      # 1. Setup Tailscale 
+      - name: Set Up Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          # MENGGUNAKAN INPUT workflow_dispatch BUKAN secrets.TS_AUTH_KEY
+          authkey: ${{ github.event.inputs.tailscale_auth_key }} 
+          hostname: github-runner-${{ github.run_id }}
           
-          # 2. Tambahkan Repositori
-          echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu jammy main" | \
-          sudo tee /etc/apt/sources.list.d/tailscale.list > /dev/null
-          
-          # 3. Instal Tailscale
-          sudo apt update
-          sudo apt install -y tailscale
+      # 2. Instal SSH Server
+      - name: Install OpenSSH Server
+        run: sudo apt update && sudo apt install -y openssh-server
 
-          # Otentikasi Tailscale menggunakan Kunci dari Workflow Input
-          echo "Melakukan Otentikasi Tailscale dengan Kunci dari Input..."
-          sudo tailscale up --authkey=${{ github.event.inputs.tailscale_auth_key }} --ssh
-          
-          # Dapatkan IP Tailscale dan simpan sebagai variabel lingkungan
-          TS_IP=$(tailscale ip -4)
-          echo "RUNNER_IP=$TS_IP" >> $GITHUB_ENV
+      # 3. MENGATUR PASSWORD dengan 'passwd'
+      - name: Set Password for Runner User
+        run: echo -e "${{ github.event.inputs.runner_password }}\n${{ github.event.inputs.runner_password }}" | sudo passwd runner
+        env:
+          # Menggunakan INPUT runner_password BUKAN secret
+          RUNNER_PASSWORD: ${{ github.event.inputs.runner_password }} 
 
-      - name: 🔐 Buat User dan Password SSH
+      # 4. Mendapatkan IP Address dan Informasi Koneksi
+      - name: Get Connection Information
         run: |
-          # Pengaturan user dan pembuatan password acak
-          VPS_USER="vpsuser"
-          # Membuat password acak
-          VPS_PASSWORD=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 12 | head -n 1)
-          
-          # Membuat user baru dan mengatur password
-          sudo adduser --disabled-password --gecos "" $VPS_USER
-          echo "$VPS_USER:$VPS_PASSWORD" | sudo chpasswd
-          sudo usermod -aG sudo $VPS_USER
-          
-          # Catat password untuk output log
-          echo "VPS_PASSWORD=$VPS_PASSWORD" >> $GITHUB_ENV
+          ip_address=$(tailscale ip -4)
+          echo "### ✅ Runner Siap diakses via SSH" >> $GITHUB_STEP_SUMMARY
+          echo "SSH Command: ssh runner@${ip_address}" >> $GITHUB_STEP_SUMMARY
+          echo "Username: **runner**" >> $GITHUB_STEP_SUMMARY
+          echo "Password: **${{ github.event.inputs.runner_password }}** (Lihat log untuk detail)" >> $GITHUB_STEP_SUMMARY
+          echo "Timeout: 350 menit" >> $GITHUB_STEP_SUMMARY
+          echo "RUNNER_IP=${ip_address}" >> $GITHUB_ENV
 
-      - name: 🔑 Catat Informasi Akses dan Tutorial SSH
+      - name: Hold Job and Wait for Timeout
         run: |
-          echo "================================================="
-          echo "      ✨ Informasi Akses VPS (SSH) Tersedia! ✨"
-          echo "================================================="
-          echo "Alamat IP Tailscale: ${{ env.RUNNER_IP }}"
-          echo "Username SSH: **vpsuser**"
-          echo "Password SSH: **${{ env.VPS_PASSWORD }}**"
-          echo ""
-          echo "📢 Tutorial Akses (Menggunakan Juicessh atau SSH Client lain):"
-          echo "1. Pastikan perangkat Anda terinstal **Tailscale** dan ter-Otorisasi ke jaringan yang sama."
-          echo "2. Buka klien SSH Anda."
-          echo "3. Buat koneksi SSH baru:"
-          echo "   - **Host/Alamat**: ${{ env.RUNNER_IP }}"
-          echo "   - **Port**: 22"
-          echo "   - **Username**: vpsuser"
-          echo "   - **Password**: ${{ env.VPS_PASSWORD }}"
-          echo "================================================="
-          
-      - name: 🕒 Jaga Runner Tetap Aktif Selama 6 Jam
-        run: |
-          echo "Job akan berjalan selama 350 menit (sekitar 5 jam 50 menit)."
-          echo "Waktu mulai: $(date)"
-          # Menjaga runner tetap berjalan
+          echo "SSH Access: runner@${{ env.RUNNER_IP }}"
+          echo "Job akan berjalan selama 350 menit (atau sampai dibatalkan)."
           sleep 350m
           
       - name: Job Finished
