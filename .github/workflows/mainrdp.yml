@@ -1,228 +1,52 @@
-name: VPS and Setup Panel
+name: Deploy VPS with Pterodactyl
 
 on:
   workflow_dispatch:
     inputs:
-      tailscale_authkey:
+      tailscale_key:
         description: 'Tailscale Auth Key'
         required: true
-        default: 'tskey-auth-~~~~~~~'
 
 jobs:
-  setup:
+  deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+    - name: Checkout Repository
+      uses: actions/checkout@v2
 
-      - name: Install dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y curl wget gnupg2 software-properties-common
+    - name: Run VPS Setup Script
+      env:
+        TAILSCALE_KEY: ${{ github.event.inputs.tailscale_key }}
+        SSH_PRIVATE_KEY: |
+          -----BEGIN OPENSSH PRIVATE KEY-----
+          your-ssh-private-key
+          -----END OPENSSH PRIVATE KEY-----
+      run: |
+        echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
 
-      - name: Install Tailscale with Retry
-        run: |
-          for i in {1..3}; do
-            echo "Attempt $i to install Tailscale..."
-            if curl -fsSL https://tailscale.com/install.sh | sh; then
-              echo "Tailscale installed successfully"
-              break
-            else
-              echo "Failed attempt $i, retrying in 5 seconds..."
-              sleep 5
-            fi
-          done
-          sudo tailscale up --authkey ${{ inputs.tailscale_authkey }} --hostname github-runner
-
-      - name: Get Tailscale IP
-        id: tailscale_ip
-        run: |
-          echo "TAILSCALE_IP=$(tailscale ip -4)" >> $GITHUB_ENV
-
-      - name: Stop and Disable Apache2 (if exists)
-        run: |
-          sudo systemctl stop apache2 || true
-          sudo systemctl disable apache2 || true
-          sudo apt remove --purge apache2* -y || true
-
-      - name: Install Docker and Docker Compose
-        run: |
-          curl -fsSL https://get.docker.com -o get-docker.sh
-          sudo sh get-docker.sh
-          sudo curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-          sudo chmod +x /usr/local/bin/docker-compose
-          sudo systemctl start docker
-          sudo systemctl enable docker
-
-      - name: Install Nginx
-        run: |
-          sudo apt install -y nginx
-          sudo systemctl start nginx
-          sudo systemctl enable nginx
-
-      - name: Remove Default Nginx Welcome Page
-        run: |
-          sudo rm -f /etc/nginx/sites-enabled/default
-          sudo rm -f /var/www/html/index.nginx-debian.html
-
-      - name: Configure Nginx Default Server Block to Serve Info Page or Proxy to Panel
-        run: |
-          sudo tee /etc/nginx/sites-available/default > /dev/null <<EOF
-          server {
-              listen 80 default_server;
-              server_name _;
-              location / {
-                  try_files /var/www/html/index.html @proxy_panel;
-              }
-              location @proxy_panel {
-                  proxy_pass http://localhost:8080;
-                  proxy_set_header Host \$host;
-                  proxy_set_header X-Real-IP \$remote_addr;
-                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto \$scheme;
-              }
-          }
-          EOF
-          sudo ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/
-          sudo nginx -t
-          sudo systemctl restart nginx
-
-      - name: Configure Nginx for Pterodactyl Panel
-        run: |
-          sudo tee /etc/nginx/sites-available/panel.panelasip.my.id > /dev/null <<EOF
-          server {
-              listen 80;
-              server_name panel.panelasip.my.id;
-              location / {
-                  proxy_pass http://localhost:8080;
-                  proxy_set_header Host \$host;
-                  proxy_set_header X-Real-IP \$remote_addr;
-                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto \$scheme;
-              }
-          }
-          EOF
-          sudo ln -s /etc/nginx/sites-available/panel.panelasip.my.id /etc/nginx/sites-enabled/
-          sudo nginx -t
-          sudo systemctl restart nginx
-
-      - name: Configure Nginx for Pterodactyl Node
-        run: |
-          sudo tee /etc/nginx/sites-available/node.panel.my.id > /dev/null <<EOF
-          server {
-              listen 80;
-              server_name node.panel.my.id;
-              location / {
-                  proxy_pass http://localhost:8081;
-                  proxy_set_header Host \$host;
-                  proxy_set_header X-Real-IP \$remote_addr;
-                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto \$scheme;
-              }
-          }
-          EOF
-          sudo ln -s /etc/nginx/sites-available/node.panel.my.id /etc/nginx/sites-enabled/
-          sudo nginx -t
-          sudo systemctl restart nginx
-
-      - name: Setup Pterodactyl Panel via Docker Compose
-        run: |
-          sudo mkdir -p /opt/pterodactyl
-          cd /opt/pterodactyl
-          sudo tee docker-compose.yml > /dev/null <<EOF
-          version: '3.8'
-          services:
-            panel:
-              image: ghcr.io/pterodactyl/panel:latest
-              restart: always
-              ports:
-                - "8080:80"
-              environment:
-                APP_URL: http://localhost
-                APP_ENV: production
-                DB_CONNECTION: sqlite
-              volumes:
-                - ./data:/app/storage
-          EOF
-          sudo docker-compose up -d
-          # Wait for panel to start
-          sleep 60
-          # Create admin user (with -T to avoid TTY error)
-          sudo docker-compose exec -T panel php artisan p:user:make --email=ashifaja123@gmail.com --password=ashifaja123 --admin=1
-
-      - name: Setup Pterodactyl Wings via Docker Compose
-        run: |
-          sudo mkdir -p /opt/pterodactyl-wings
-          cd /opt/pterodactyl-wings
-          sudo tee docker-compose.yml > /dev/null <<EOF
-          version: '3.8'
-          services:
-            wings:
-              image: ghcr.io/pterodactyl/wings:latest
-              restart: always
-              ports:
-                - "8081:8080"
-              volumes:
-                - ./config.yml:/etc/pterodactyl/config.yml
-                - ./data:/srv/daemon-data
-          EOF
-          # Create basic config (update token after getting from panel)
-          sudo tee config.yml > /dev/null <<EOF
-          debug: false
-          uuid: "your-uuid-here"
-          token: "YOUR_WINGS_TOKEN"
-          api:
-            host: "http://localhost:8080"
-            port: 8080
-            ssl: false
-            upload_limit: 100
-          system:
-            data: "/srv/daemon-data"
-            sftp:
-              bind_port: 2022
-          allowed_mounts: []
-          remote: "ws://localhost:8080"
-          EOF
-          sudo docker-compose up -d
-
-      - name: Create Info Page for Website
-        run: |
-          sudo mkdir -p /var/www/html
-          sudo tee /var/www/html/index.html > /dev/null <<EOF
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-              <meta charset="UTF-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0">
-              <title>Pterodactyl Setup Info</title>
-          </head>
-          <body>
-              <h1>Pterodactyl Panel and Wings Setup</h1>
-              <p><strong>IP VPS:</strong> ${{ env.TAILSCALE_IP }}</p>
-              <p><strong>VPS Password:</strong> (Default Ubuntu runner, no password set)</p>
-              <p><strong>Akun Panel:</strong> ashifaja123@gmail.com</p>
-              <p><strong>Password Panel:</strong> ashifaja123</p>
-              <p><strong>Panel URL:</strong> <a href="http://panel.panelasip.my.id">panel.panelasip.my.id</a></p>
-              <p><strong>Node URL:</strong> <a href="http://node.panel.my.id">node.panel.my.id</a></p>
-              <h2>Docker Containers:</h2>
-              <pre>$(sudo docker ps -a)</pre>
-              <h2>Docker Compose Status:</h2>
-              <pre>$(cd /opt/pterodactyl && sudo docker-compose ps)</pre>
-              <pre>$(cd /opt/pterodactyl-wings && sudo docker-compose ps)</pre>
-              <h2>Ports in Use:</h2>
-              <pre>$(sudo netstat -tlnp | grep -E ":(80|8080|8081) ")</pre>
-          </body>
-          </html>
-          EOF
-
-      - name: Output Information
-        run: |
-          echo "IP VPS: ${{ env.TAILSCALE_IP }}"
-          echo "VPS Password: (Default Ubuntu runner, no password set)"
-          echo "Akun Panel: ashifaja123@gmail.com"
-          echo "Password Panel: ashifaja123"
-
-      - name: Keep Runner Running for 6 Hours
-        run: |
-          echo "Runner akan berjalan terus selama 6 jam..."
-          sleep 21600  # 6 jam dalam detik
+        # Menjalankan perintah di VPS
+        ssh -o StrictHostKeyChecking=no user@your-vps-ip << 'EOF'
+          # Install Tailscale
+          curl -fsSL https://tailscale.com/install.sh | sh
+          tailscale up --authkey=$TAILSCALE_KEY
+          
+          # Install Docker
+          apt-get update && apt-get install -y docker.io
+          
+          # Install Panel Pterodactyl tanpa Wings
+          docker run -d --name pterodactyl-panel \
+            -e APP_URL=http://your-vps-ip \
+            -e DB_PASSWORD=your_db_password \
+            -p 80:80 \
+            pterodactyl/panel:latest
+        
+          # Tampilkan informasi sebelum tidur
+          echo "IP VPS: your-vps-ip"
+          echo "Panel Login: ashifaja123@gmail.com"
+          echo "Panel Password: ashifaja123"
+        
+          # Tunggu selama 6 jam
+          sleep 21600 # 6 jam dalam detik
+        EOF
