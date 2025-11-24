@@ -1,19 +1,19 @@
-name: Tailscale Runner HP Version (Max 6 Hours)
+name: Tailscale Runner HP Version (Pterodactyl)
 
 # Trigger workflow secara manual dengan input
 on:
   workflow_dispatch:
     inputs:
-      # INPUT BARU untuk Kunci Otorisasi Tailscale (sesuai gambar)
+      # INPUT untuk Kunci Otorisasi Tailscale
       tailscale_auth_key:
         description: 'Kunci Otorisasi Tailscale'
         required: true
         default: ''
-      # INPUT BARU untuk Password SSH Runner
+      # INPUT untuk Password SSH Runner (Hanya untuk debugging)
       runner_password:
         description: 'Password untuk User SSH Runner (Perhatian: terlihat di log)'
         required: true
-        default: 'vpspass123' # Ganti dengan password yang Anda inginkan
+        default: 'vpspass123' 
 
 jobs:
   temporary-vps-access:
@@ -24,11 +24,10 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 1. Setup Tailscale 
+      # 1. Setup Tailscale (Menggunakan Input)
       - name: Set Up Tailscale
         uses: tailscale/github-action@v2
         with:
-          # MENGGUNAKAN INPUT workflow_dispatch BUKAN secrets.TS_AUTH_KEY
           authkey: ${{ github.event.inputs.tailscale_auth_key }} 
           hostname: github-runner-${{ github.run_id }}
           
@@ -36,28 +35,111 @@ jobs:
       - name: Install OpenSSH Server
         run: sudo apt update && sudo apt install -y openssh-server
 
-      # 3. MENGATUR PASSWORD dengan 'passwd'
-      - name: Set Password for Runner User
+      # 3. MENGATUR PASSWORD SSH (Dipertahankan untuk akses darurat/debugging)
+      - name: Set Password for Runner User (SSH)
         run: echo -e "${{ github.event.inputs.runner_password }}\n${{ github.event.inputs.runner_password }}" | sudo passwd runner
         env:
-          # Menggunakan INPUT runner_password BUKAN secret
           RUNNER_PASSWORD: ${{ github.event.inputs.runner_password }} 
 
-      # 4. Mendapatkan IP Address dan Informasi Koneksi
+      # =========================================================
+      # ⬇️ AWAL MODIFIKASI: Instalasi Pterodactyl dan Nginx ⬇️
+      # =========================================================
+
+      - name: ⚙️ Install Docker dan Docker Compose
+        run: |
+          echo "Menginstal Docker dan menambahkan user runner ke grup docker..."
+          sudo apt update
+          sudo apt install -y apt-transport-https ca-certificates curl gnupg lsb-release
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt update
+          sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+          sudo usermod -aG docker runner # Tambahkan user runner ke grup docker
+
+      - name: 🚀 Deploy Pterodactyl Panel (Via Docker Compose)
+        run: |
+          echo "Menyiapkan direktori Pterodactyl..."
+          mkdir -p /home/runner/pterodactyl
+          cd /home/runner/pterodactyl
+
+          # Mengunduh docker-compose.yml (Contoh konfigurasi Pterodactyl)
+          wget -q -O docker-compose.yml https://raw.githubusercontent.com/pterodactyl/panel/develop/docker-compose.yml
+
+          # Menyesuaikan file .env (Konfigurasi wajib sebelum setup web)
+          # Menggunakan password default yang sederhana untuk mempermudah setup manual
+          cp .env.example .env
+          
+          # Jalankan container (MySQL, Redis, Panel)
+          echo "Menjalankan container Pterodactyl..."
+          docker compose up -d
+
+      - name: 🌐 Setup Nginx dan Konfigurasi Tailscale
+        run: |
+          TS_IP=$(tailscale ip -4)
+          echo "Tailscale IP Ditemukan: $TS_IP"
+          
+          # 1. Instal Nginx
+          sudo apt install -y nginx
+
+          # 2. Hapus default config Apache/Nginx
+          sudo rm /etc/nginx/sites-enabled/default
+          
+          # 3. Buat konfigurasi Nginx untuk Pterodactyl (mendengarkan di IP Tailscale)
+          sudo tee /etc/nginx/sites-available/pterodactyl.conf > /dev/null <<EOF
+server {
+    listen 80;
+    server_name $TS_IP;
+
+    root /home/runner/pterodactyl/public; # Asumsi panel di-mount ke public
+
+    index index.html index.php;
+    
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php$ {
+        # Mengarahkan ke PHP FPM di container Pterodactyl (port 9000)
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass 127.0.0.1:9000;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param PATH_INFO \$fastcgi_path_info;
+    }
+}
+EOF
+          # 4. Aktifkan konfigurasi Nginx dan restart
+          sudo ln -s /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
+          sudo systemctl restart nginx
+          echo "Pterodactyl siap diakses melalui Nginx di IP Tailscale: $TS_IP"
+          echo "RUNNER_IP=$TS_IP" >> $GITHUB_ENV # Simpan IP Tailscale
+
+      # =========================================================
+      # ⬆️ AKHIR MODIFIKASI ⬆️
+      # =========================================================
+      
+      # 4. Mendapatkan IP Address dan Informasi Koneksi (Diubah untuk Web Access)
       - name: Get Connection Information
         run: |
-          ip_address=$(tailscale ip -4)
-          echo "### ✅ Runner Siap diakses via SSH" >> $GITHUB_STEP_SUMMARY
-          echo "SSH Command: ssh runner@${ip_address}" >> $GITHUB_STEP_SUMMARY
-          echo "Username: **runner**" >> $GITHUB_STEP_SUMMARY
-          echo "Password: **${{ github.event.inputs.runner_password }}** (Lihat log untuk detail)" >> $GITHUB_STEP_SUMMARY
+          ip_address=${{ env.RUNNER_IP }}
+          echo "### ✅ Runner Siap diakses via Web!" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚠️ PENTING: Anda harus menyelesaikan Setup Pterodactyl via web." >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "🌐 **Akses Web (Pterodactyl)**:" >> $GITHUB_STEP_SUMMARY
+          echo "   - **URL**: http://${ip_address}" >> $GITHUB_STEP_SUMMARY
+          echo "   - **CATATAN**: Anda harus berada di jaringan Tailscale yang sama!" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "🔑 **Akses SSH (Debugging)**:" >> $GITHUB_STEP_SUMMARY
+          echo "   - **Command**: ssh runner@${ip_address}" >> $GITHUB_STEP_SUMMARY
+          echo "   - **Password**: ${{ github.event.inputs.runner_password }}" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
           echo "Timeout: 350 menit" >> $GITHUB_STEP_SUMMARY
-          echo "RUNNER_IP=${ip_address}" >> $GITHUB_ENV
 
       - name: Hold Job and Wait for Timeout
         run: |
-          echo "SSH Access: runner@${{ env.RUNNER_IP }}"
-          echo "Job akan berjalan selama 350 menit (atau sampai dibatalkan)."
+          echo "Akses web diaktifkan di IP Tailscale: ${{ env.RUNNER_IP }}"
+          echo "Job akan berjalan selama 350 menit (atau sampai dibatalkan). Segera selesaikan Setup Pterodactyl Anda!"
           sleep 350m
           
       - name: Job Finished
