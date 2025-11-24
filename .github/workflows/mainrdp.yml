@@ -1,28 +1,22 @@
-name: Terapkan VPS dengan SSH dan Tailscale
-
-on:
-  workflow_dispatch:
-    inputs:
-      tailscale_auth_key:
-        description: 'Kunci Otorisasi Tailscale'
-        required: true # Kita ubah jadi required agar Tailscale pasti terhubung
-        default: ''
-
-jobs:
-  vps_runner:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: ⏳ Siapkan Lingkungan dan Install Tailscale
+      - name: ⏳ Siapkan Lingkungan dan Install Tailscale (Diperbaiki)
         run: |
           # Perbarui dan Install Kebutuhan Dasar
           sudo apt update
           sudo apt install -y curl wget openssh-server
 
-          # Install Tailscale
-          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.no-tarsnap.gpg | sudo dd of=/usr/share/keyrings/tailscale-archive-keyring.gpg
-          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.asc | sudo tee /usr/share/keyrings/tailscale-archive-keyring.asc > /dev/null
-          echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu jammy main" | sudo tee /etc/apt/sources.list.d/tailscale.list
+          # --- PERBAIKAN GPG ERROR DIMULAI DI SINI ---
+          # 1. Unduh kunci publik Tailscale dan simpan di /usr/share/keyrings/
+          #    Menggunakan metode yang lebih modern untuk memastikan kunci dikenali oleh APT.
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.no-tarsnap.gpg | \
+          sudo gpg --dearmor -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+          
+          # 2. Tambahkan repositori, merujuk langsung ke keyring baru
+          echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu jammy main" | \
+          sudo tee /etc/apt/sources.list.d/tailscale.list > /dev/null
+          
+          # --- PERBAIKAN GPG ERROR SELESAI DI SINI ---
+          
+          # Lanjutkan Instalasi
           sudo apt update
           sudo apt install -y tailscale
 
@@ -33,45 +27,3 @@ jobs:
           # Dapatkan IP Tailscale
           TS_IP=$(tailscale ip -4)
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-
-      - name: 🔐 Buat User dan Password SSH
-        run: |
-          # Tambahkan user 'vpsuser' dan set password
-          VPS_USER="vpsuser"
-          # Membuat password acak
-          VPS_PASSWORD=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 12 | head -n 1)
-          
-          sudo adduser --disabled-password --gecos "" $VPS_USER
-          echo "$VPS_USER:$VPS_PASSWORD" | sudo chpasswd
-          sudo usermod -aG sudo $VPS_USER
-          
-          # Catat password untuk output
-          echo "VPS_PASSWORD=$VPS_PASSWORD" >> $GITHUB_ENV
-
-      - name: 🔑 Catat Informasi Akses dan Tutorial SSH
-        run: |
-          echo "================================================="
-          echo "      ✨ Informasi Akses VPS (SSH) Tersedia! ✨"
-          echo "================================================="
-          echo "Alamat IP Tailscale: ${{ env.TAILSCALE_IP }}"
-          echo "Username SSH: vpsuser"
-          echo "Password SSH: ${{ env.VPS_PASSWORD }}"
-          echo ""
-          echo "📢 Tutorial Akses (Menggunakan Juicessh/SSH Client):"
-          echo "1. Pastikan perangkat Anda sudah terinstal Tailscale dan ter-Otorisasi ke jaringan yang sama."
-          echo "2. Buka Juicessh (atau klien SSH lain)."
-          echo "3. Buat koneksi SSH baru."
-          echo "   - Host/Alamat: ${{ env.TAILSCALE_IP }}"
-          echo "   - Port: 22 (Default SSH)"
-          echo "4. Masukkan Username: vpsuser dan Password: ${{ env.VPS_PASSWORD }}"
-          echo "5. Klik Connect! Selamat bekerja selama 6 jam! 🚀"
-          echo "================================================="
-          
-      - name: 🕒 Jaga Runner Tetap Aktif Selama 6 Jam
-        run: |
-          echo "Runner akan tetap berjalan selama 6 jam (360 menit)."
-          echo "Waktu mulai: $(date)"
-          # Menjaga runner tetap berjalan selama 360 menit (6 jam)
-          sleep 360m
-          echo "Waktu habis: $(date)"
-          echo "Runner akan dimatikan."
