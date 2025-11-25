@@ -2,7 +2,6 @@
 
 name: Instalasi Pterodactyl Panel via Docker + Tailscale
 
-# Workflow hanya dapat dipicu secara manual (disarankan)
 on:
   workflow_dispatch: 
 
@@ -17,7 +16,7 @@ jobs:
         uses: actions/checkout@v4
 
       # =================================================================
-      # A. SETUP DOCKER (SOLUSI KONFLIK DEPENDENSI)
+      # A. SETUP DOCKER (Waktu Jeda Dioptimalkan)
       # =================================================================
       - name: Instalasi Docker dari Repositori Resmi
         run: |
@@ -40,16 +39,15 @@ jobs:
           sudo usermod -aG docker $USER
           
           echo "Docker siap digunakan. Memberi jeda 10 detik untuk stabilitas."
-          sleep 10 # JEDA DIPERSINGKAT
+          sleep 10
           
       # =================================================================
-      # B. SETUP TAILSCALE (METODE DOCKER STABIL & FIX ERROR)
+      # B. SETUP TAILSCALE (Stabil, Docker-based)
       # =================================================================
-      - name: Setup dan Login Tailscale (Fix Error)
+      - name: Setup dan Login Tailscale
         timeout-minutes: 5 
         run: |
           echo "Menjalankan Tailscale dalam mode container..."
-          # Jalankan Tailscale Daemon sebagai container
           docker run -d --name=tailscaled \
             --network=host \
             --cap-add=NET_ADMIN \
@@ -58,10 +56,8 @@ jobs:
             ghcr.io/tailscale/tailscale:latest \
             /bin/sh -c "tailscaled --cleanup; tailscaled"
 
-          # Tunggu Tailscale Daemon inisialisasi
           sleep 5 
           
-          # Login menggunakan Auth Key. Menghapus --unattended yang error.
           docker exec tailscaled tailscale up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
             --hostname=github-runner-${{ github.sha }} \
@@ -72,18 +68,16 @@ jobs:
       - name: Jeda 10 Detik Setelah Koneksi Tailscale
         run: |
           echo "Koneksi Tailscale terjalin. Memberi jeda 10 detik untuk propagasi IP."
-          sleep 10 # JEDA DIPERSINGKAT
+          sleep 10 
 
       - name: Cetak Detail Akses Tailscale
         id: tailscale_info
         run: |
-          # Dapatkan IP dari dalam container Tailscale
           IP_ADDR=$(docker exec tailscaled tailscale ip -4)
-          
           echo "::set-output name=tailscale_ip::${IP_ADDR}"
           
       # =================================================================
-      # C. SETUP SERVER SSH (Akses Debugging via JuiceSSH)
+      # C. SETUP SERVER SSH (Dihilangkan systemctl)
       # =================================================================
       - name: Instalasi OpenSSH Server dan Konfigurasi Kunci
         env:
@@ -91,8 +85,7 @@ jobs:
         run: |
           echo "Menginstal OpenSSH Server..."
           sudo apt install -y openssh-server
-          sudo systemctl start ssh
-          sudo systemctl enable ssh
+          # HILANG: systemctl start/enable SSH. Diharapkan otomatis.
           
           # Konfigurasi Kunci
           mkdir -p ~/.ssh
@@ -101,7 +94,7 @@ jobs:
           chmod 600 ~/.ssh/authorized_keys
           
           echo "SSH siap. User: 'runner'. Memberi jeda 10 detik untuk server."
-          sleep 10 # JEDA DIPERSINGKAT
+          sleep 10
 
       # =================================================================
       # D. INSTALASI PTERODACTYL PANEL via DOCKER
@@ -118,7 +111,7 @@ jobs:
           ghcr.io/pterodactyl/panel:latest
           
           echo "Pterodactyl Panel berjalan. Memberi jeda 20 detik untuk inisialisasi Panel."
-          sleep 20 # JEDA DIPERSINGKAT
+          sleep 20
 
       # =================================================================
       # D.5 GENERATE APP_KEY (TOLERAN GAGAL)
@@ -126,7 +119,6 @@ jobs:
       - name: Generate Application Key (APP_KEY)
         run: |
           echo "Membuat kunci enkripsi aplikasi (APP_KEY)..."
-          # Perintah ini akan selalu berhasil (|| true) agar workflow lanjut
           docker exec panel php artisan key:generate --force || true
           echo "Kunci APP_KEY dipicu. Jika gagal, Anda bisa SSH dan melakukannya manual."
 
@@ -137,7 +129,6 @@ jobs:
         run: |
           echo "Mencoba membuat akun admin (ROCKWATER)..."
           
-          # Perintah ini akan selalu berhasil (|| true) agar workflow lanjut
           docker exec panel php artisan p:user:make \
               --email="ashifaja123@gmail.com" \
               --username="ROCKWATER" \
@@ -148,19 +139,17 @@ jobs:
               
           echo "================================================="
           echo "  PERINGATAN: Pembuatan akun diabaikan jika gagal."
-          echo "  Jika Panel kosong, gunakan SSH untuk menjalankan:"
-          echo "  docker exec panel php artisan p:user:make [detail]"
           echo "================================================="
 
       # =================================================================
-      # F. SETUP NGINX (Reverse Proxy)
+      # F. SETUP NGINX (FIX systemctl DENGAN PERINTAH NGINX LANGSUNG)
       # =================================================================
-      - name: Instalasi Nginx dan Konfigurasi Reverse Proxy
+      - name: Instalasi Nginx dan Konfigurasi Reverse Proxy (FINAL FIX)
         run: |
           echo "Menginstal Nginx..."
           sudo apt install -y nginx
           
-          # Konfigurasi Nginx untuk mengarahkan ke Docker Panel (8080)
+          # Konfigurasi Nginx
           sudo tee /etc/nginx/sites-available/pterodactyl.conf > /dev/null <<EOT
           server {
               listen 80 default_server;
@@ -183,8 +172,10 @@ jobs:
           sudo ln -s /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
           sudo rm -f /etc/nginx/sites-enabled/default
           
-          echo "Memuat ulang/Memulai Nginx..."
-          sudo systemctl restart nginx
+          echo "Memulai Nginx tanpa systemctl..."
+          # FIX: Menjalankan Nginx secara langsung di latar belakang
+          sudo nginx # Perintah ini menjalankan Nginx di latar belakang sebagai daemon
+          echo "Nginx seharusnya sudah berjalan di latar belakang."
           
       # =================================================================
       # G. MENJAGA RUNNER TETAP HIDUP (Akses Maksimal 6 Jam)
