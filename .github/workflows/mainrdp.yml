@@ -1,3 +1,24 @@
+Name: Ptero Docker + Tailscale Lite
+
+on:
+  # FIX: Memastikan trigger manual (Workflow Dispatch) ada
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    # Timeout 6 jam
+    timeout-minutes: 360
+
+    steps:
+      - name: Install Docker
+        run: |
+          echo "Menginstal Docker..."
+          sudo apt update -y
+          curl -fsSL https://get.docker.com | sh
+          # Menggunakan '|| true' agar tidak gagal jika systemctl tidak ada (seperti pada GitHub Actions)
+          sudo systemctl start docker || true
+
       - name: Install & Start Tailscale (Metode Link Interaktif)
         run: |
           # 1. Instalasi Tailscale Langsung (Bukan via Docker)
@@ -8,18 +29,16 @@
           sudo apt install -y tailscale
 
           # 2. Menjalankan Tailscale (Ini akan mencetak link otorisasi)
-          echo "Menjalankan tailscale up..."
-          echo "PERINGATAN: RUNNER AKAN MACET DI SINI MENUNGGU OTORISASI!"
-          echo "Cek Log untuk Link Otorisasi (Anda harus mengklik link dalam 5 menit)."
+          echo "====================================================="
+          echo "  ⚠️ HARAP OTORISASI SEKARANG"
+          echo "  RUNNER AKAN MACET DI SINI SELAMA 5 MENIT."
+          echo "  Cek Log untuk Link Otorisasi dan Klik 'Authorize'!"
+          echo "====================================================="
           
-          # Jalankan tailscale up. Timeout step ini diatur oleh timeout-minutes: 360 di job level
-          # Kami tambahkan timeout 5 menit di sini untuk menghindari runner stuck selamanya.
-          # Jika Anda tidak mengklik link dalam 5 menit, step ini akan gagal,
-          # tapi workflow akan berlanjut karena kita tidak mau membuat pekerjaan stuck.
+          # Jalankan tailscale up secara interaktif. Timeout 5 menit.
+          timeout 300 tailscale up --hostname=gh-runner-${{ github.run_id }} --accept-routes || true
           
-          timeout 300 tailscale up --accept-routes || true
-          
-          # Tunggu sebentar dan coba dapatkan IP
+          # Tunggu dan coba dapatkan IP
           sleep 10
           TS_IP=$(tailscale ip -4 2>/dev/null || true)
 
@@ -28,3 +47,77 @@
           else
             echo "❌ Gagal mendapatkan IP Tailscale. Anda mungkin perlu mengotorisasi secara manual setelah SSH."
           fi
+
+      - name: Start MariaDB
+        run: |
+          echo "Menjalankan MariaDB Container..."
+          docker rm -f db || true
+          docker run -d --name db \
+            -e MARIADB_ROOT_PASSWORD=rootpass \
+            -e MARIADB_DATABASE=ptero \
+            -e MARIADB_USER=ptero \
+            -e MARIADB_PASSWORD=ptero123 \
+            mariadb:10.6
+
+      - name: Start Panel + init DB + create admin
+        run: |
+          ADMIN_PASS=$(openssl rand -hex 6)
+          docker rm -f panel || true
+          echo "Menjalankan Pterodactyl Panel Container..."
+          docker run -d --name panel \
+            --link db:db \
+            -p 8080:80 \
+            -e DB_CONNECTION=mysql \
+            -e DB_HOST=db \
+            -e DB_PORT=3306 \
+            -e DB_DATABASE=ptero \
+            -e DB_USERNAME=ptero \
+            -e DB_PASSWORD=ptero123 \
+            ghcr.io/pterodactyl/panel:latest || true
+
+          # wait filesystem & artisan availability
+          for i in $(seq 1 60); do
+            if docker exec panel sh -c "test -f /var/www/pterodactyl/artisan" >/dev/null 2>&1 || docker exec panel sh -c "test -f /var/www/html/artisan" >/dev/null 2>&1; then
+              echo "Panel filesystem ready."
+              break
+            fi
+            echo "Waiting for panel container..."
+            sleep 2
+          done
+
+          # find artisan path and app dir
+          if docker exec panel sh -c "test -f /var/www/pterodactyl/artisan" >/dev/null 2>&1; then
+            APP_DIR="/var/www/pterodactyl"
+          else
+            APP_DIR="/var/www/html"
+          fi
+
+          # ensure .env and key, migrate, create admin (tolerant)
+          docker exec panel sh -c "cd ${APP_DIR} && cp .env.example .env 2>/dev/null || true"
+          docker exec panel sh -c "cd ${APP_DIR} && sed -i 's|APP_URL=.*|APP_URL=http://127.0.0.1:8080|' .env || true"
+          docker exec panel sh -c "cd ${APP_DIR} && php artisan key:generate --force || true"
+          docker exec panel sh -c "cd ${APP_DIR} && php artisan migrate --force || true"
+          docker exec panel sh -c "cd ${APP_DIR} && php artisan p:user:make --email='ashifaja123@gmail.com' --username='admin' --name-first='Admin' --name-last='User' --password='${ADMIN_PASS}' --admin=1 || true"
+
+          # capture tailscale IP (if present) and public IP
+          # Mengambil IP Tailscale dari instalasi langsung (bukan docker exec)
+          TS_IP=$(tailscale ip -4 2>/dev/null || true)
+          PUBLIC_IP=$(curl -s https://api.ipify.org || echo "127.0.0.1")
+
+          echo "===================================="
+          echo "Pterodactyl Panel (Docker) READY"
+          if [ -n "$TS_IP" ]; then
+            echo "Akses via Tailscale: http://${TS_IP}:8080"
+          fi
+          echo "Akses via Host: http://${PUBLIC_IP}:8080"
+          echo "Admin user : admin"
+          echo "Admin pass : ${ADMIN_PASS}"
+          echo "DB user    : ptero  DB pass: ptero123"
+          echo "===================================="
+          echo ""
+          echo "To shell into panel container: docker exec -it panel sh"
+
+      - name: Keep Alive 6h
+        run: |
+          echo "Runner sleeping for 6 hours..."
+          sleep 6h
