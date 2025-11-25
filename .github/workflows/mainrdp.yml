@@ -39,14 +39,14 @@ jobs:
           # Menambahkan user ke grup docker
           sudo usermod -aG docker $USER
           
-          echo "Docker siap digunakan. Memberi jeda 20 detik untuk stabilitas."
-          sleep 20 
+          echo "Docker siap digunakan. Memberi jeda 10 detik untuk stabilitas."
+          sleep 10 # JEDA DIPERSINGKAT
           
       # =================================================================
       # B. SETUP TAILSCALE (METODE DOCKER STABIL & FIX ERROR)
       # =================================================================
       - name: Setup dan Login Tailscale (Fix Error)
-        timeout-minutes: 5 # Timeout jika macet terlalu lama
+        timeout-minutes: 5 
         run: |
           echo "Menjalankan Tailscale dalam mode container..."
           # Jalankan Tailscale Daemon sebagai container
@@ -69,10 +69,10 @@ jobs:
             
           echo "Tailscale telah dipicu untuk login."
 
-      - name: Jeda 20 Detik Setelah Koneksi Tailscale
+      - name: Jeda 10 Detik Setelah Koneksi Tailscale
         run: |
-          echo "Koneksi Tailscale terjalin. Memberi jeda 20 detik untuk propagasi IP."
-          sleep 20 
+          echo "Koneksi Tailscale terjalin. Memberi jeda 10 detik untuk propagasi IP."
+          sleep 10 # JEDA DIPERSINGKAT
 
       - name: Cetak Detail Akses Tailscale
         id: tailscale_info
@@ -100,8 +100,8 @@ jobs:
           chmod 700 ~/.ssh
           chmod 600 ~/.ssh/authorized_keys
           
-          echo "SSH siap. User: 'runner'. Memberi jeda 20 detik untuk server."
-          sleep 20 
+          echo "SSH siap. User: 'runner'. Memberi jeda 10 detik untuk server."
+          sleep 10 # JEDA DIPERSINGKAT
 
       # =================================================================
       # D. INSTALASI PTERODACTYL PANEL via DOCKER
@@ -117,8 +117,8 @@ jobs:
           --restart=always \
           ghcr.io/pterodactyl/panel:latest
           
-          echo "Pterodactyl Panel berjalan. Memberi jeda 30 detik untuk inisialisasi Panel."
-          sleep 30 
+          echo "Pterodactyl Panel berjalan. Memberi jeda 20 detik untuk inisialisasi Panel."
+          sleep 20 # JEDA DIPERSINGKAT
 
       # =================================================================
       # D.5 GENERATE APP_KEY (TOLERAN GAGAL)
@@ -184,7 +184,6 @@ jobs:
           sudo rm -f /etc/nginx/sites-enabled/default
           
           echo "Memuat ulang/Memulai Nginx..."
-          # Fix error: Menggunakan 'restart' untuk memastikan layanan aktif
           sudo systemctl restart nginx
           
       # =================================================================
