@@ -1,245 +1,90 @@
-name: Instalasi Pterodactyl Panel via Docker + Tailscale
+name: Pterodactyl Docker (Light)
 
 on:
   workflow_dispatch:
 
 jobs:
-  pterodactyl_setup:
+  panel:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    timeout-minutes: 360
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # -------------------------
-      # A. Update & Dependensi
-      # -------------------------
-      - name: Update system & install basic deps
+      - name: Prepare environment & Docker
         run: |
           sudo apt update -y
-          sudo apt install -y ca-certificates curl gnupg lsb-release software-properties-common python3 python3-pip jq openssh-server nginx
-
-      # -------------------------
-      # B. Install Docker (safe)
-      # -------------------------
-      - name: Install Docker (from repo) and start dockerd if needed
-        run: |
-          echo "Installing Docker CE..."
-          sudo mkdir -p /etc/apt/keyrings
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-          sudo apt update -y
-          sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-
-          # try to start docker via systemctl but tolerate failure on GH Actions
-          sudo systemctl start docker || true
-          sudo systemctl enable docker || true
-
-          # if docker not running, start dockerd in background
+          sudo apt install -y ca-certificates curl gnupg lsb-release jq
+          # Install Docker (safe script)
+          curl -fsSL https://get.docker.com | sh
+          # Ensure docker is usable (start dockerd if not active)
           if ! sudo docker info > /dev/null 2>&1; then
-            echo "Docker not active via systemctl — launching dockerd in background..."
             sudo dockerd > /tmp/dockerd.log 2>&1 &
-            # Wait up to 20s for docker to respond
             for i in $(seq 1 20); do
-              if sudo docker info > /dev/null 2>&1; then
-                echo "Docker daemon up."
-                break
-              fi
+              if sudo docker info > /dev/null 2>&1; then break; fi
               sleep 1
             done
           fi
-
           sudo docker version
 
-      # -------------------------
-      # C. Setup Tailscale (docker-based)
-      # -------------------------
-      - name: Run Tailscale container & authenticate
-        env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-        timeout-minutes: 5
+      - name: Launch Pterodactyl Panel container (SQLite, basic)
         run: |
-          echo "Starting tailscaled container..."
-          docker rm -f tailscaled || true
-          docker run -d --name=tailscaled \
-            --network=host \
-            --cap-add=NET_ADMIN \
-            -v /var/lib:/var/lib \
-            -v /dev/net/tun:/dev/net/tun \
-            ghcr.io/tailscale/tailscale:latest \
-            /bin/sh -c "tailscaled --cleanup; tailscaled"
-          sleep 5
+          ADMIN_EMAIL="ashifaja123@gmail.com"
+          ADMIN_USER="admin"
+          ADMIN_PASS=$(openssl rand -base64 12 | tr -dc 'A-Za-z0-9' | cut -c1-12)
+          echo "Admin will be: ${ADMIN_USER} / ${ADMIN_PASS}"
 
-          echo "Bringing up tailscale with authkey..."
-          docker exec tailscaled tailscale up \
-            --authkey=${TAILSCALE_AUTH_KEY} \
-            --hostname=github-runner-${{ github.run_id }} \
-            --accept-routes || true
-
-          # Wait a bit for IP to appear
-          for i in $(seq 1 15); do
-            TS_IP=$(docker exec tailscaled tailscale ip -4 2>/dev/null || true)
-            if [ -n "$TS_IP" ]; then
-              echo "Tailscale IP: $TS_IP"
-              break
-            fi
-            sleep 1
-          done
-
-      - name: Get Tailscale IP (output)
-        id: tailscale_info
-        run: |
-          IP_ADDR=$(docker exec tailscaled tailscale ip -4 2>/dev/null || true)
-          echo "::set-output name=tailscale_ip::${IP_ADDR}"
-
-      # -------------------------
-      # D. Setup OpenSSH Server (no systemctl)
-      # -------------------------
-      - name: Install OpenSSH and configure keys & password
-        env:
-          PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
-        run: |
-          echo "Ensuring SSH installed..."
-          sudo apt install -y openssh-server || true
-
-          # Make sure ssh host keys exist
-          sudo mkdir -p /var/run/sshd
-          sudo ssh-keygen -A || true
-
-          # Add public key for runner user
-          mkdir -p ~/.ssh
-          echo "${PUBLIC_KEY}" >> ~/.ssh/authorized_keys
-          chmod 700 ~/.ssh
-          chmod 600 ~/.ssh/authorized_keys
-
-          # Set a VPS password (sesuai permintaan)
-          VPS_PASS="Maesaroh"
-          echo "runner:${VPS_PASS}" | sudo chpasswd || true
-
-          # Start sshd directly (no systemctl). tolerate failure.
-          sudo /usr/sbin/sshd || true
-
-          echo "SSH should be available (key auth). VPS password set to: ${VPS_PASS}"
-          echo "::set-output name=vps_password::${VPS_PASS}"
-
-      # -------------------------
-      # E. Run Pterodactyl Panel Container (no wings)
-      # -------------------------
-      - name: Run Pterodactyl Panel (Docker)
-        run: |
-          echo "Launching Pterodactyl Panel container (no wings)..."
+          # Remove any previous container
           docker rm -f panel || true
+
+          # Run panel image (bind to host 8080)
           docker run -d --name panel \
             -p 8080:80 \
-            -p 8081:443 \
             --env APP_ENV=production \
-            --env-file <(echo 'APP_URL=http://127.0.0.1') \
-            --restart=always \
+            --env APP_URL=http://127.0.0.1 \
             ghcr.io/pterodactyl/panel:latest || true
 
-          # Wait for container to be up
-          for i in $(seq 1 30); do
-            if docker ps --filter "name=panel" --filter "status=running" | grep panel >/dev/null 2>&1; then
-              echo "Panel container running."
+          # Wait for container filesystem to be ready
+          for i in $(seq 1 40); do
+            if docker exec panel sh -c "test -f /var/www/pterodactyl/artisan || test -f /var/www/html/artisan" > /dev/null 2>&1; then
+              echo "Panel filesystem present."
               break
             fi
-            echo "Waiting for panel container..."
+            echo "Waiting for panel container to be ready..."
             sleep 2
           done
 
-      - name: Generate APP_KEY & create admin (tolerant)
+          # Determine where artisan is located (common paths)
+          if docker exec panel sh -c "test -f /var/www/pterodactyl/artisan" > /dev/null 2>&1; then
+            ARTISAN="/var/www/pterodactyl/artisan"
+            APP_DIR="/var/www/pterodactyl"
+          else
+            ARTISAN="/var/www/html/artisan"
+            APP_DIR="/var/www/html"
+          fi
+
+          # Prepare env, key, migrate, and create admin (tolerant)
+          docker exec panel sh -c "cd ${APP_DIR} && cp .env.example .env 2>/dev/null || true"
+          docker exec panel sh -c "cd ${APP_DIR} && sed -i 's|APP_URL=.*|APP_URL=http://127.0.0.1|' .env || true"
+          docker exec panel sh -c "cd ${APP_DIR} && php artisan key:generate --force || true"
+          docker exec panel sh -c "cd ${APP_DIR} && php artisan migrate --force || true"
+
+          # Try to create admin user (if command exists). tolerate failure.
+          docker exec panel sh -c "cd ${APP_DIR} && php artisan p:user:make --email='${ADMIN_EMAIL}' --username='${ADMIN_USER}' --name-first='Admin' --name-last='User' --password='${ADMIN_PASS}' --admin=1 || true"
+
+          # Print details to workflow log
+          PUBLIC_IP=$(curl -s https://api.ipify.org || echo "127.0.0.1")
+          echo "--------------------------------------------------"
+          echo "PTERODACTYL PANEL (Docker) - READY (ephemeral runner)"
+          echo "Access (host): http://${PUBLIC_IP}:8080"
+          echo "Admin email : ${ADMIN_EMAIL}"
+          echo "Admin user  : ${ADMIN_USER}"
+          echo "Admin pass  : ${ADMIN_PASS}"
+          echo "Container name: panel"
+          echo "--------------------------------------------------"
+
+          # Provide a simple command to shell into panel container
+          echo "To open shell (locally or via SSH): docker exec -it panel sh"
+
+      - name: Keep runner alive 6 hours
         run: |
-          # Try to run artisan commands; if fail, continue
-          echo "Attempt to generate APP_KEY..."
-          docker exec panel php artisan key:generate --force || true
-
-          echo "Attempt to create admin user ROCKWATER..."
-          docker exec panel php artisan p:user:make \
-            --email="ashifaja123@gmail.com" \
-            --username="ROCKWATER" \
-            --name-first="ashif" \
-            --name-last="aja123" \
-            --password="Maesaroh" \
-            --admin=1 || true
-
-          # Collect panel logs (short) to help debugging
-          echo "Panel logs (last 200 lines):"
-          docker logs panel --tail 200 || true
-
-      # -------------------------
-      # F. Install & configure Nginx (no SSL)
-      # -------------------------
-      - name: Install Nginx Reverse Proxy (no SSL) and start
-        run: |
-          echo "Ensure nginx installed..."
-          sudo apt install -y nginx || true
-
-          sudo tee /etc/nginx/sites-available/pterodactyl.conf > /dev/null <<'EOT'
-          server {
-              listen 80 default_server;
-              listen [::]:80 default_server;
-              server_name _;
-
-              location / {
-                  proxy_pass http://127.0.0.1:8080;
-                  proxy_set_header Host $host;
-                  proxy_set_header X-Real-IP $remote_addr;
-                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto $scheme;
-                  proxy_read_timeout 900;
-              }
-          }
-          EOT
-
-          sudo rm -f /etc/nginx/sites-enabled/default || true
-          sudo ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/pterodactyl.conf
-
-          # Test & start nginx without systemctl
-          sudo nginx -t || true
-          sudo nginx -s stop || true
-          sudo nginx || true
-
-      # -------------------------
-      # G. Print Access Info (Tailscale IP, VPS password, Panel info)
-      # -------------------------
-      - name: Print connection details and credentials
-        id: print_info
-        run: |
-          TS_IP="${{ steps.tailscale_info.outputs.tailscale_ip }}"
-          VPS_PASS="${{ steps.print_info.outputs.vps_password || 'Maesaroh' }}" || true
-
-          # If the step outputs.vps_password is not available, set to Maesaroh
-          VPS_PASS="Maesaroh"
-
-          echo "================================================="
-          echo "INSTALASI SELESAI (sebagian mungkin gagal tapi workflow lanjut)."
-          echo "================================================="
-          echo "Akses Web Pterodactyl (via Tailscale IP):"
-          echo "-> http://${TS_IP}/"
-          echo ""
-          echo "Akses SSH:"
-          echo "-> User: runner"
-          echo "-> Host: ${TS_IP}"
-          echo "-> VPS Password (set): ${VPS_PASS}"
-          echo "-> (Jika pakai key, gunakan private key yg cocok dengan SSH_PUBLIC_KEY)"
-          echo ""
-
-          echo "POTENSI AKUN ADMIN PANEL:"
-          echo "-> Username: ROCKWATER"
-          echo "-> Email: ashifaja123@gmail.com"
-          echo "-> Password (yang dicoba dibuat): Maesaroh"
-          echo ""
-          echo "NOTE: Jika pembuatan akun gagal, silakan SSH ke runner dan jalankan:"
-          echo " docker exec panel php artisan p:user:make --email=\"ashifaja123@gmail.com\" --username=\"ROCKWATER\" --name-first=\"ashif\" --name-last=\"aja123\" --password=\"Maesaroh\" --admin=1"
-          echo "atau generate APP_KEY manual: docker exec panel php artisan key:generate --force"
-          echo "================================================="
-
-      # -------------------------
-      # H. Keep runner alive 6 hours
-      # -------------------------
-      - name: Runner Sleep 6 Jam
-        run: |
-          echo "Runner akan tidur selama 6 jam..."
+          echo "Runner will sleep for 6 hours..."
           sleep 6h
