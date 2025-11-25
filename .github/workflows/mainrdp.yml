@@ -1,6 +1,6 @@
 # .github/workflows/pterodactyl_install.yml
 
-name: Instalasi Pterodactyl Panel via Docker + Tailscale (Versi Stabil)
+name: Instalasi Pterodactyl Panel via Docker + Tailscale (Versi Stabil dengan @v1)
 
 # Workflow hanya dapat dipicu secara manual
 on:
@@ -34,27 +34,27 @@ jobs:
 
           echo "Menginstal Docker CE, CLI, dan containerd.io..."
           sudo apt update
-          # Menginstal paket spesifik dari Docker, yang mengatasi konflik containerd
           sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 
           # Menambahkan user ke grup docker
           sudo usermod -aG docker $USER
           
           echo "Docker siap digunakan. Memberi jeda 20 detik untuk stabilitas."
-          sleep 20 # Jeda 20 detik sesuai permintaan
+          sleep 20 
           
       # =================================================================
       # B. SETUP TAILSCALE (Akses Jaringan Aman)
       # =================================================================
       - name: Setup dan Login Tailscale
-        uses: tailscale/github-action@v2
+        # PERUBAHAN: Menggunakan versi @v1 untuk menghindari konflik OAuth
+        uses: tailscale/github-action@v1 
         with:
           authkey: ${{ secrets.TAILSCALE_AUTH_KEY }} 
           
       - name: Jeda 20 Detik Setelah Koneksi Tailscale
         run: |
           echo "Koneksi Tailscale terjalin. Memberi jeda 20 detik untuk propagasi IP."
-          sleep 20 # Jeda 20 detik untuk memastikan koneksi stabil
+          sleep 20 
 
       - name: Cetak Detail Akses Tailscale (Aman di Log)
         id: tailscale_info
@@ -89,7 +89,7 @@ jobs:
           chmod 600 ~/.ssh/authorized_keys
           
           echo "SSH siap. User: 'runner'. Memberi jeda 20 detik untuk server."
-          sleep 20 # Jeda 20 detik setelah SSH siap
+          sleep 20 
 
       # =================================================================
       # D. INSTALASI PTERODACTYL PANEL via DOCKER
@@ -98,7 +98,6 @@ jobs:
         run: |
           echo "Menjalankan Pterodactyl Panel Container..."
           
-          # Menjalankan Panel Container di port 8080 (untuk diakses Nginx)
           docker run -d --name panel \
           -p 8080:80 \
           -p 8081:443 \
@@ -107,7 +106,7 @@ jobs:
           ghcr.io/pterodactyl/panel:latest
           
           echo "Pterodactyl Panel berjalan. Memberi jeda 30 detik untuk inisialisasi Panel."
-          sleep 30 # Jeda lebih lama untuk inisialisasi Panel
+          sleep 30 
 
       # =================================================================
       # E. MEMBUAT AKUN ADMINISTRATOR PANEL
@@ -116,7 +115,6 @@ jobs:
         run: |
           echo "Menunggu Panel siap..."
           
-          # Perintah untuk membuat user admin
           docker exec panel php artisan p:user:make \
               --email="ashifaja123@gmail.com" \
               --username="ROCKWATER" \
@@ -139,7 +137,6 @@ jobs:
           echo "Menginstal Nginx..."
           sudo apt install -y nginx
           
-          # Membuat file konfigurasi Nginx untuk Pterodactyl
           sudo tee /etc/nginx/sites-available/pterodactyl.conf > /dev/null <<EOT
           server {
               listen 80 default_server;
@@ -157,7 +154,6 @@ jobs:
           }
           EOT
 
-          # Mengaktifkan konfigurasi
           sudo ln -s /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
           sudo rm -f /etc/nginx/sites-enabled/default
           
