@@ -65,7 +65,7 @@ jobs:
           docker exec tailscaled tailscale up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
             --hostname=github-runner-${{ github.sha }} \
-            --accept-routes # Flag ini menjaga koneksi stabil
+            --accept-routes
             
           echo "Tailscale telah dipicu untuk login."
 
@@ -74,7 +74,7 @@ jobs:
           echo "Koneksi Tailscale terjalin. Memberi jeda 20 detik untuk propagasi IP."
           sleep 20 
 
-      - name: Cetak Detail Akses Tailscale (Aman di Log)
+      - name: Cetak Detail Akses Tailscale
         id: tailscale_info
         run: |
           # Dapatkan IP dari dalam container Tailscale
@@ -82,12 +82,6 @@ jobs:
           # Dapatkan Hostname untuk akses MagicDNS
           HOSTNAME=$(docker exec tailscaled tailscale status --json | grep '"Self"' | cut -d: -f2 | cut -d, -f1 | tr -d ' "')
           
-          echo "================================================="
-          echo "  DETAIL AKSES TAILSCALE"
-          echo "================================================="
-          echo "1. Hostname Mesin (MagicDNS): -> ${HOSTNAME}.[tailnet-name].ts.net"
-          echo "2. Alamat IP Tailscale (Aman): -> ${IP_ADDR}"
-          echo "================================================="
           echo "::set-output name=tailscale_ip::${IP_ADDR}"
           
       # =================================================================
@@ -129,25 +123,35 @@ jobs:
           sleep 30 
 
       # =================================================================
-      # E. MEMBUAT AKUN ADMINISTRATOR PANEL
+      # D.5 GENERATE APP_KEY (TOLERAN GAGAL)
+      # =================================================================
+      - name: Generate Application Key (APP_KEY)
+        run: |
+          echo "Membuat kunci enkripsi aplikasi (APP_KEY)..."
+          # Perintah ini akan selalu berhasil (|| true) agar workflow lanjut
+          docker exec panel php artisan key:generate --force || true
+          echo "Kunci APP_KEY dipicu. Jika gagal, Anda bisa SSH dan melakukannya manual."
+
+      # =================================================================
+      # E. MEMBUAT AKUN ADMINISTRATOR PANEL (TOLERAN GAGAL)
       # =================================================================
       - name: Membuat Akun Administrator Panel
         run: |
-          echo "Menunggu Panel siap..."
+          echo "Mencoba membuat akun admin (ROCKWATER)..."
           
-          # Detail Akun Admin Anda
+          # Perintah ini akan selalu berhasil (|| true) agar workflow lanjut
           docker exec panel php artisan p:user:make \
               --email="ashifaja123@gmail.com" \
               --username="ROCKWATER" \
               --name-first="ashif" \
               --name-last="aja123" \
               --password="Maesaroh" \
-              --admin=1
+              --admin=1 || true
               
           echo "================================================="
-          echo "  AKUN ADMIN PTERODACTYL BERHASIL DIBUAT"
-          echo "  Username: ROCKWATER"
-          echo "  Password: Maesaroh (WAJIB GANTI SETELAH LOGIN!)"
+          echo "  PERINGATAN: Pembuatan akun diabaikan jika gagal."
+          echo "  Jika Panel kosong, gunakan SSH untuk menjalankan:"
+          echo "  docker exec panel php artisan p:user:make [detail]"
           echo "================================================="
 
       # =================================================================
@@ -163,6 +167,7 @@ jobs:
           server {
               listen 80 default_server;
               listen [::]:80 default_server;
+              listen 443 ssl;
               server_name _; 
               
               location / {
@@ -189,8 +194,23 @@ jobs:
       - name: Runner Sleep 6 Jam
         run: |
           IP_ADDR_FINAL=${{ steps.tailscale_info.outputs.tailscale_ip }}
-          echo "Instalasi SELESAI. Runner akan tidur selama 6 jam."
-          echo "Akses Web: http://${IP_ADDR_FINAL}/"
-          echo "Akses SSH: ssh runner@${IP_ADDR_FINAL}"
+          
+          echo "================================================="
+          echo "  ✅ INSTALASI SELESAI. RUNNER AKTIF 6 JAM"
+          echo "================================================="
+          echo "  Akses Web Pterodactyl:"
+          echo "  -> http://${IP_ADDR_FINAL}/"
+          echo ""
+          echo "  Akses SSH (JuiceSSH):"
+          echo "  -> User: runner"
+          echo "  -> IP: ${IP_ADDR_FINAL}"
+          echo "  -> Password: Gunakan Kunci SSH Private Key Anda."
+          echo ""
+          echo "  AKUN PANEL (Jika langkah E berhasil):"
+          echo "  -> Username: ROCKWATER"
+          echo "  -> Password: Maesaroh"
+          echo "================================================="
+          
+          echo "Runner akan tidur selama 6 jam..."
           sleep 6h
           echo "Job selesai / dibatalkan oleh GitHub setelah 6 jam."
