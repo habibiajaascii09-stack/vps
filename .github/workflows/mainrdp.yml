@@ -1,53 +1,68 @@
-# .github/workflows/pterodactyl_install.yml
-
 name: Instalasi Pterodactyl Panel via Docker + Tailscale
 
 on:
-  workflow_dispatch: 
+  workflow_dispatch:
 
 jobs:
   pterodactyl_setup:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    
+
     steps:
-      - name: Checkout Kode Repositori
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # =================================================================
-      # A. SETUP DOCKER (Waktu Jeda Dioptimalkan)
-      # =================================================================
-      - name: Instalasi Docker dari Repositori Resmi
+      # -------------------------
+      # A. Update & Dependensi
+      # -------------------------
+      - name: Update system & install basic deps
         run: |
-          echo "Menginstal paket dasar dan kunci GPG..."
-          sudo apt update
-          sudo apt install -y ca-certificates curl gnupg lsb-release
+          sudo apt update -y
+          sudo apt install -y ca-certificates curl gnupg lsb-release software-properties-common python3 python3-pip jq openssh-server nginx
 
-          # Tambahkan kunci GPG resmi Docker
-          sudo mkdir -m 0755 -p /etc/apt/keyrings
+      # -------------------------
+      # B. Install Docker (safe)
+      # -------------------------
+      - name: Install Docker (from repo) and start dockerd if needed
+        run: |
+          echo "Installing Docker CE..."
+          sudo mkdir -p /etc/apt/keyrings
           curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-
-          # Tambahkan repositori Docker ke sources.list
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-          echo "Menginstal Docker CE, CLI, dan containerd.io..."
-          sudo apt update
+          sudo apt update -y
           sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 
-          # Menambahkan user ke grup docker
-          sudo usermod -aG docker $USER
-          
-          echo "Docker siap digunakan. Memberi jeda 10 detik untuk stabilitas."
-          sleep 10
-          
-      # =================================================================
-      # B. SETUP TAILSCALE (Stabil, Docker-based)
-      # =================================================================
-      - name: Setup dan Login Tailscale
-        timeout-minutes: 5 
+          # try to start docker via systemctl but tolerate failure on GH Actions
+          sudo systemctl start docker || true
+          sudo systemctl enable docker || true
+
+          # if docker not running, start dockerd in background
+          if ! sudo docker info > /dev/null 2>&1; then
+            echo "Docker not active via systemctl — launching dockerd in background..."
+            sudo dockerd > /tmp/dockerd.log 2>&1 &
+            # Wait up to 20s for docker to respond
+            for i in $(seq 1 20); do
+              if sudo docker info > /dev/null 2>&1; then
+                echo "Docker daemon up."
+                break
+              fi
+              sleep 1
+            done
+          fi
+
+          sudo docker version
+
+      # -------------------------
+      # C. Setup Tailscale (docker-based)
+      # -------------------------
+      - name: Run Tailscale container & authenticate
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        timeout-minutes: 5
         run: |
-          echo "Menjalankan Tailscale dalam mode container..."
+          echo "Starting tailscaled container..."
+          docker rm -f tailscaled || true
           docker run -d --name=tailscaled \
             --network=host \
             --cap-add=NET_ADMIN \
@@ -55,151 +70,176 @@ jobs:
             -v /dev/net/tun:/dev/net/tun \
             ghcr.io/tailscale/tailscale:latest \
             /bin/sh -c "tailscaled --cleanup; tailscaled"
+          sleep 5
 
-          sleep 5 
-          
+          echo "Bringing up tailscale with authkey..."
           docker exec tailscaled tailscale up \
-            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
-            --hostname=github-runner-${{ github.sha }} \
-            --accept-routes
-            
-          echo "Tailscale telah dipicu untuk login."
+            --authkey=${TAILSCALE_AUTH_KEY} \
+            --hostname=github-runner-${{ github.run_id }} \
+            --accept-routes || true
 
-      - name: Jeda 10 Detik Setelah Koneksi Tailscale
-        run: |
-          echo "Koneksi Tailscale terjalin. Memberi jeda 10 detik untuk propagasi IP."
-          sleep 10 
+          # Wait a bit for IP to appear
+          for i in $(seq 1 15); do
+            TS_IP=$(docker exec tailscaled tailscale ip -4 2>/dev/null || true)
+            if [ -n "$TS_IP" ]; then
+              echo "Tailscale IP: $TS_IP"
+              break
+            fi
+            sleep 1
+          done
 
-      - name: Cetak Detail Akses Tailscale
+      - name: Get Tailscale IP (output)
         id: tailscale_info
         run: |
-          IP_ADDR=$(docker exec tailscaled tailscale ip -4)
+          IP_ADDR=$(docker exec tailscaled tailscale ip -4 2>/dev/null || true)
           echo "::set-output name=tailscale_ip::${IP_ADDR}"
-          
-      # =================================================================
-      # C. SETUP SERVER SSH (Dihilangkan systemctl)
-      # =================================================================
-      - name: Instalasi OpenSSH Server dan Konfigurasi Kunci
+
+      # -------------------------
+      # D. Setup OpenSSH Server (no systemctl)
+      # -------------------------
+      - name: Install OpenSSH and configure keys & password
         env:
-          PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }} 
+          PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
         run: |
-          echo "Menginstal OpenSSH Server..."
-          sudo apt install -y openssh-server
-          # HILANG: systemctl start/enable SSH. Diharapkan otomatis.
-          
-          # Konfigurasi Kunci
+          echo "Ensuring SSH installed..."
+          sudo apt install -y openssh-server || true
+
+          # Make sure ssh host keys exist
+          sudo mkdir -p /var/run/sshd
+          sudo ssh-keygen -A || true
+
+          # Add public key for runner user
           mkdir -p ~/.ssh
-          echo "$PUBLIC_KEY" >> ~/.ssh/authorized_keys
+          echo "${PUBLIC_KEY}" >> ~/.ssh/authorized_keys
           chmod 700 ~/.ssh
           chmod 600 ~/.ssh/authorized_keys
-          
-          echo "SSH siap. User: 'runner'. Memberi jeda 10 detik untuk server."
-          sleep 10
 
-      # =================================================================
-      # D. INSTALASI PTERODACTYL PANEL via DOCKER
-      # =================================================================
-      - name: Menjalankan Container Pterodactyl Panel
+          # Set a VPS password (sesuai permintaan)
+          VPS_PASS="Maesaroh"
+          echo "runner:${VPS_PASS}" | sudo chpasswd || true
+
+          # Start sshd directly (no systemctl). tolerate failure.
+          sudo /usr/sbin/sshd || true
+
+          echo "SSH should be available (key auth). VPS password set to: ${VPS_PASS}"
+          echo "::set-output name=vps_password::${VPS_PASS}"
+
+      # -------------------------
+      # E. Run Pterodactyl Panel Container (no wings)
+      # -------------------------
+      - name: Run Pterodactyl Panel (Docker)
         run: |
-          echo "Menjalankan Pterodactyl Panel Container..."
-          
+          echo "Launching Pterodactyl Panel container (no wings)..."
+          docker rm -f panel || true
           docker run -d --name panel \
-          -p 8080:80 \
-          -p 8081:443 \
-          --env-file <(echo 'APP_URL=http://localhost') \
-          --restart=always \
-          ghcr.io/pterodactyl/panel:latest
-          
-          echo "Pterodactyl Panel berjalan. Memberi jeda 20 detik untuk inisialisasi Panel."
-          sleep 20
+            -p 8080:80 \
+            -p 8081:443 \
+            --env APP_ENV=production \
+            --env-file <(echo 'APP_URL=http://127.0.0.1') \
+            --restart=always \
+            ghcr.io/pterodactyl/panel:latest || true
 
-      # =================================================================
-      # D.5 GENERATE APP_KEY (TOLERAN GAGAL)
-      # =================================================================
-      - name: Generate Application Key (APP_KEY)
+          # Wait for container to be up
+          for i in $(seq 1 30); do
+            if docker ps --filter "name=panel" --filter "status=running" | grep panel >/dev/null 2>&1; then
+              echo "Panel container running."
+              break
+            fi
+            echo "Waiting for panel container..."
+            sleep 2
+          done
+
+      - name: Generate APP_KEY & create admin (tolerant)
         run: |
-          echo "Membuat kunci enkripsi aplikasi (APP_KEY)..."
+          # Try to run artisan commands; if fail, continue
+          echo "Attempt to generate APP_KEY..."
           docker exec panel php artisan key:generate --force || true
-          echo "Kunci APP_KEY dipicu. Jika gagal, Anda bisa SSH dan melakukannya manual."
 
-      # =================================================================
-      # E. MEMBUAT AKUN ADMINISTRATOR PANEL (TOLERAN GAGAL)
-      # =================================================================
-      - name: Membuat Akun Administrator Panel
-        run: |
-          echo "Mencoba membuat akun admin (ROCKWATER)..."
-          
+          echo "Attempt to create admin user ROCKWATER..."
           docker exec panel php artisan p:user:make \
-              --email="ashifaja123@gmail.com" \
-              --username="ROCKWATER" \
-              --name-first="ashif" \
-              --name-last="aja123" \
-              --password="Maesaroh" \
-              --admin=1 || true
-              
-          echo "================================================="
-          echo "  PERINGATAN: Pembuatan akun diabaikan jika gagal."
-          echo "================================================="
+            --email="ashifaja123@gmail.com" \
+            --username="ROCKWATER" \
+            --name-first="ashif" \
+            --name-last="aja123" \
+            --password="Maesaroh" \
+            --admin=1 || true
 
-      # =================================================================
-      # F. SETUP NGINX (FIX systemctl DENGAN PERINTAH NGINX LANGSUNG)
-      # =================================================================
-      - name: Instalasi Nginx dan Konfigurasi Reverse Proxy (FINAL FIX)
+          # Collect panel logs (short) to help debugging
+          echo "Panel logs (last 200 lines):"
+          docker logs panel --tail 200 || true
+
+      # -------------------------
+      # F. Install & configure Nginx (no SSL)
+      # -------------------------
+      - name: Install Nginx Reverse Proxy (no SSL) and start
         run: |
-          echo "Menginstal Nginx..."
-          sudo apt install -y nginx
-          
-          # Konfigurasi Nginx
-          sudo tee /etc/nginx/sites-available/pterodactyl.conf > /dev/null <<EOT
+          echo "Ensure nginx installed..."
+          sudo apt install -y nginx || true
+
+          sudo tee /etc/nginx/sites-available/pterodactyl.conf > /dev/null <<'EOT'
           server {
               listen 80 default_server;
               listen [::]:80 default_server;
-              listen 443 ssl;
-              server_name _; 
-              
+              server_name _;
+
               location / {
-                  proxy_pass http://127.0.0.1:8080; 
-                  proxy_set_header Host \$host;
-                  proxy_set_header X-Real-IP \$remote_addr;
-                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto \$scheme;
+                  proxy_pass http://127.0.0.1:8080;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
                   proxy_read_timeout 900;
               }
           }
           EOT
 
-          # Mengaktifkan konfigurasi
-          sudo ln -s /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
-          sudo rm -f /etc/nginx/sites-enabled/default
-          
-          echo "Memulai Nginx tanpa systemctl..."
-          # FIX: Menjalankan Nginx secara langsung di latar belakang
-          sudo nginx # Perintah ini menjalankan Nginx di latar belakang sebagai daemon
-          echo "Nginx seharusnya sudah berjalan di latar belakang."
-          
-      # =================================================================
-      # G. MENJAGA RUNNER TETAP HIDUP (Akses Maksimal 6 Jam)
-      # =================================================================
+          sudo rm -f /etc/nginx/sites-enabled/default || true
+          sudo ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/pterodactyl.conf
+
+          # Test & start nginx without systemctl
+          sudo nginx -t || true
+          sudo nginx -s stop || true
+          sudo nginx || true
+
+      # -------------------------
+      # G. Print Access Info (Tailscale IP, VPS password, Panel info)
+      # -------------------------
+      - name: Print connection details and credentials
+        id: print_info
+        run: |
+          TS_IP="${{ steps.tailscale_info.outputs.tailscale_ip }}"
+          VPS_PASS="${{ steps.print_info.outputs.vps_password || 'Maesaroh' }}" || true
+
+          # If the step outputs.vps_password is not available, set to Maesaroh
+          VPS_PASS="Maesaroh"
+
+          echo "================================================="
+          echo "INSTALASI SELESAI (sebagian mungkin gagal tapi workflow lanjut)."
+          echo "================================================="
+          echo "Akses Web Pterodactyl (via Tailscale IP):"
+          echo "-> http://${TS_IP}/"
+          echo ""
+          echo "Akses SSH:"
+          echo "-> User: runner"
+          echo "-> Host: ${TS_IP}"
+          echo "-> VPS Password (set): ${VPS_PASS}"
+          echo "-> (Jika pakai key, gunakan private key yg cocok dengan SSH_PUBLIC_KEY)"
+          echo ""
+
+          echo "POTENSI AKUN ADMIN PANEL:"
+          echo "-> Username: ROCKWATER"
+          echo "-> Email: ashifaja123@gmail.com"
+          echo "-> Password (yang dicoba dibuat): Maesaroh"
+          echo ""
+          echo "NOTE: Jika pembuatan akun gagal, silakan SSH ke runner dan jalankan:"
+          echo " docker exec panel php artisan p:user:make --email=\"ashifaja123@gmail.com\" --username=\"ROCKWATER\" --name-first=\"ashif\" --name-last=\"aja123\" --password=\"Maesaroh\" --admin=1"
+          echo "atau generate APP_KEY manual: docker exec panel php artisan key:generate --force"
+          echo "================================================="
+
+      # -------------------------
+      # H. Keep runner alive 6 hours
+      # -------------------------
       - name: Runner Sleep 6 Jam
         run: |
-          IP_ADDR_FINAL=${{ steps.tailscale_info.outputs.tailscale_ip }}
-          
-          echo "================================================="
-          echo "  ✅ INSTALASI SELESAI. RUNNER AKTIF 6 JAM"
-          echo "================================================="
-          echo "  Akses Web Pterodactyl:"
-          echo "  -> http://${IP_ADDR_FINAL}/"
-          echo ""
-          echo "  Akses SSH (JuiceSSH):"
-          echo "  -> User: runner"
-          echo "  -> IP: ${IP_ADDR_FINAL}"
-          echo "  -> Password: Gunakan Kunci SSH Private Key Anda."
-          echo ""
-          echo "  AKUN PANEL (Jika langkah E berhasil):"
-          echo "  -> Username: ROCKWATER"
-          echo "  -> Password: Maesaroh"
-          echo "================================================="
-          
           echo "Runner akan tidur selama 6 jam..."
           sleep 6h
-          echo "Job selesai / dibatalkan oleh GitHub setelah 6 jam."
