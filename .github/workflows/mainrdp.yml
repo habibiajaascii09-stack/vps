@@ -1,7 +1,6 @@
 name: Ptero Docker + Tailscale Lite
 
 on:
-  # Memastikan trigger manual (Workflow Dispatch) ada
   workflow_dispatch:
 
 jobs:
@@ -19,13 +18,15 @@ jobs:
           sudo systemctl start docker || true
 
       # =========================================================
-      # 1. STEP BARU: Menambahkan Repositori Tailscale & Update (Menggunakan wget)
+      # 1. STEP BARU: Menambahkan Repositori Tailscale & Update (FINAL FIX URL 404)
       # =========================================================
       - name: Add Tailscale Repository and Update Apt
         run: |
-          echo "Menambahkan kunci dan repositori Tailscale dengan metode wget yang lebih kuat..."
-          # 1. Tambahkan Kunci GPG Resmi
-          sudo wget -O /usr/share/keyrings/tailscale-archive-keyring.gpg https://pkgs.tailscale.com/stable/ubuntu/jammy.no-tardist.asc
+          echo "Memperbaiki dan menambahkan kunci GPG resmi Tailscale..."
+
+          # 1. Tambahkan Kunci GPG Resmi (FIXED URL: menggunakan .gpg)
+          # Perbaikan untuk error 404 Not Found
+          sudo wget -q -O /usr/share/keyrings/tailscale-archive-keyring.gpg https://pkgs.tailscale.com/stable/ubuntu/jammy.gpg
 
           # 2. Tambahkan Repositori ke sources.list.d
           echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu jammy main" | sudo tee /etc/apt/sources.list.d/tailscale.list
