@@ -1,90 +1,112 @@
-name: Pterodactyl Docker (Light)
+name: Ptero Docker + Tailscale Lite
 
 on:
   workflow_dispatch:
 
 jobs:
-  panel:
+  run:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
-      - name: Prepare environment & Docker
+      - name: Install Docker
         run: |
           sudo apt update -y
-          sudo apt install -y ca-certificates curl gnupg lsb-release jq
-          # Install Docker (safe script)
           curl -fsSL https://get.docker.com | sh
-          # Ensure docker is usable (start dockerd if not active)
-          if ! sudo docker info > /dev/null 2>&1; then
-            sudo dockerd > /tmp/dockerd.log 2>&1 &
-            for i in $(seq 1 20); do
-              if sudo docker info > /dev/null 2>&1; then break; fi
-              sleep 1
-            done
-          fi
-          sudo docker version
+          sudo systemctl start docker || true
 
-      - name: Launch Pterodactyl Panel container (SQLite, basic)
+      - name: Start Tailscale (container) and login
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          ADMIN_EMAIL="ashifaja123@gmail.com"
-          ADMIN_USER="admin"
-          ADMIN_PASS=$(openssl rand -base64 12 | tr -dc 'A-Za-z0-9' | cut -c1-12)
-          echo "Admin will be: ${ADMIN_USER} / ${ADMIN_PASS}"
-
-          # Remove any previous container
-          docker rm -f panel || true
-
-          # Run panel image (bind to host 8080)
-          docker run -d --name panel \
-            -p 8080:80 \
-            --env APP_ENV=production \
-            --env APP_URL=http://127.0.0.1 \
-            ghcr.io/pterodactyl/panel:latest || true
-
-          # Wait for container filesystem to be ready
-          for i in $(seq 1 40); do
-            if docker exec panel sh -c "test -f /var/www/pterodactyl/artisan || test -f /var/www/html/artisan" > /dev/null 2>&1; then
-              echo "Panel filesystem present."
+          docker rm -f tailscaled || true
+          docker run -d --name=tailscaled \
+            --network=host \
+            --cap-add=NET_ADMIN \
+            -v /var/lib:/var/lib \
+            -v /dev/net/tun:/dev/net/tun \
+            ghcr.io/tailscale/tailscale:latest \
+            /bin/sh -c "tailscaled --cleanup; tailscaled"
+          sleep 4
+          # Try to authenticate (tolerant)
+          docker exec tailscaled tailscale up --authkey=${TAILSCALE_AUTH_KEY} --hostname=gh-runner-${{ github.run_id }} --accept-routes || true
+          # wait for IP
+          for i in $(seq 1 20); do
+            TS_IP=$(docker exec tailscaled tailscale ip -4 2>/dev/null || true)
+            if [ -n "$TS_IP" ]; then
+              echo "Tailscale IP: $TS_IP"
               break
             fi
-            echo "Waiting for panel container to be ready..."
+            sleep 1
+          done
+
+      - name: Start MariaDB
+        run: |
+          docker rm -f db || true
+          docker run -d --name db \
+            -e MARIADB_ROOT_PASSWORD=rootpass \
+            -e MARIADB_DATABASE=ptero \
+            -e MARIADB_USER=ptero \
+            -e MARIADB_PASSWORD=ptero123 \
+            mariadb:10.6
+
+      - name: Start Panel + init DB + create admin
+        run: |
+          ADMIN_PASS=$(openssl rand -hex 6)
+          docker rm -f panel || true
+          docker run -d --name panel \
+            --link db:db \
+            -p 8080:80 \
+            -e DB_CONNECTION=mysql \
+            -e DB_HOST=db \
+            -e DB_PORT=3306 \
+            -e DB_DATABASE=ptero \
+            -e DB_USERNAME=ptero \
+            -e DB_PASSWORD=ptero123 \
+            ghcr.io/pterodactyl/panel:latest || true
+
+          # wait filesystem & artisan availability (paths vary)
+          for i in $(seq 1 60); do
+            if docker exec panel sh -c "test -f /var/www/pterodactyl/artisan" >/dev/null 2>&1 || docker exec panel sh -c "test -f /var/www/html/artisan" >/dev/null 2>&1; then
+              echo "Panel filesystem ready."
+              break
+            fi
+            echo "Waiting for panel container..."
             sleep 2
           done
 
-          # Determine where artisan is located (common paths)
-          if docker exec panel sh -c "test -f /var/www/pterodactyl/artisan" > /dev/null 2>&1; then
-            ARTISAN="/var/www/pterodactyl/artisan"
+          # find artisan path and app dir
+          if docker exec panel sh -c "test -f /var/www/pterodactyl/artisan" >/dev/null 2>&1; then
             APP_DIR="/var/www/pterodactyl"
           else
-            ARTISAN="/var/www/html/artisan"
             APP_DIR="/var/www/html"
           fi
 
-          # Prepare env, key, migrate, and create admin (tolerant)
+          # ensure .env and key, migrate, create admin (tolerant)
           docker exec panel sh -c "cd ${APP_DIR} && cp .env.example .env 2>/dev/null || true"
-          docker exec panel sh -c "cd ${APP_DIR} && sed -i 's|APP_URL=.*|APP_URL=http://127.0.0.1|' .env || true"
+          docker exec panel sh -c "cd ${APP_DIR} && sed -i 's|APP_URL=.*|APP_URL=http://127.0.0.1:8080|' .env || true"
           docker exec panel sh -c "cd ${APP_DIR} && php artisan key:generate --force || true"
           docker exec panel sh -c "cd ${APP_DIR} && php artisan migrate --force || true"
+          docker exec panel sh -c "cd ${APP_DIR} && php artisan p:user:make --email='ashifaja123@gmail.com' --username='admin' --name-first='Admin' --name-last='User' --password='${ADMIN_PASS}' --admin=1 || true"
 
-          # Try to create admin user (if command exists). tolerate failure.
-          docker exec panel sh -c "cd ${APP_DIR} && php artisan p:user:make --email='${ADMIN_EMAIL}' --username='${ADMIN_USER}' --name-first='Admin' --name-last='User' --password='${ADMIN_PASS}' --admin=1 || true"
-
-          # Print details to workflow log
+          # capture tailscale IP (if present) and public IP
+          TS_IP=$(docker exec tailscaled tailscale ip -4 2>/dev/null || true)
           PUBLIC_IP=$(curl -s https://api.ipify.org || echo "127.0.0.1")
-          echo "--------------------------------------------------"
-          echo "PTERODACTYL PANEL (Docker) - READY (ephemeral runner)"
-          echo "Access (host): http://${PUBLIC_IP}:8080"
-          echo "Admin email : ${ADMIN_EMAIL}"
-          echo "Admin user  : ${ADMIN_USER}"
-          echo "Admin pass  : ${ADMIN_PASS}"
-          echo "Container name: panel"
-          echo "--------------------------------------------------"
 
-          # Provide a simple command to shell into panel container
-          echo "To open shell (locally or via SSH): docker exec -it panel sh"
+          echo "===================================="
+          echo "Pterodactyl Panel (Docker) READY"
+          if [ -n "$TS_IP" ]; then
+            echo "Access via Tailscale: http://${TS_IP}:8080"
+          fi
+          echo "Access via Host: http://${PUBLIC_IP}:8080"
+          echo "Admin user : admin"
+          echo "Admin pass : ${ADMIN_PASS}"
+          echo "DB user    : ptero  DB pass: ptero123"
+          echo "===================================="
+          echo ""
+          echo "To shell into panel container: docker exec -it panel sh"
 
-      - name: Keep runner alive 6 hours
+      - name: Keep Alive 6h
         run: |
-          echo "Runner will sleep for 6 hours..."
+          echo "Runner sleeping for 6 hours..."
           sleep 6h
