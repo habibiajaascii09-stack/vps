@@ -1,6 +1,6 @@
 # .github/workflows/pterodactyl_install.yml
 
-name: Instalasi Pterodactyl Panel via Docker + Tailscale
+name: Instalasi Pterodactyl Panel via Docker + Tailscale (Versi Stabil)
 
 # Workflow hanya dapat dipicu secara manual
 on:
@@ -17,47 +17,65 @@ jobs:
         uses: actions/checkout@v4
 
       # =================================================================
-      # A. SETUP DOCKER & DOCKER COMPOSE
+      # A. SETUP DOCKER (SOLUSI UNTUK MENGATASI KONFLIK DEPENDENSI)
       # =================================================================
-      - name: Instalasi Docker dan Dependencies
+      - name: Instalasi Docker dari Repositori Resmi
         run: |
-          echo "Memperbarui sistem dan menginstal Docker..."
+          echo "Menginstal paket dasar dan kunci GPG..."
           sudo apt update
-          sudo apt install -y docker.io docker-compose
-          sudo systemctl start docker
-          sudo systemctl enable docker
-          # Menambahkan user ke grup docker agar bisa menjalankan docker tanpa sudo
-          sudo usermod -aG docker $USER
-          echo "Docker siap digunakan."
+          sudo apt install -y ca-certificates curl gnupg lsb-release
 
+          # Tambahkan kunci GPG resmi Docker
+          sudo mkdir -m 0755 -p /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+          # Tambahkan repositori Docker ke sources.list
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+          echo "Menginstal Docker CE, CLI, dan containerd.io..."
+          sudo apt update
+          # Menginstal paket spesifik dari Docker, yang mengatasi konflik containerd
+          sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+          # Menambahkan user ke grup docker
+          sudo usermod -aG docker $USER
+          
+          echo "Docker siap digunakan. Memberi jeda 20 detik untuk stabilitas."
+          sleep 20 # Jeda 20 detik sesuai permintaan
+          
       # =================================================================
       # B. SETUP TAILSCALE (Akses Jaringan Aman)
       # =================================================================
       - name: Setup dan Login Tailscale
         uses: tailscale/github-action@v2
         with:
-          # Menggunakan pre-auth key dari GitHub Secret
           authkey: ${{ secrets.TAILSCALE_AUTH_KEY }} 
           
+      - name: Jeda 20 Detik Setelah Koneksi Tailscale
+        run: |
+          echo "Koneksi Tailscale terjalin. Memberi jeda 20 detik untuk propagasi IP."
+          sleep 20 # Jeda 20 detik untuk memastikan koneksi stabil
+
       - name: Cetak Detail Akses Tailscale (Aman di Log)
         id: tailscale_info
         run: |
+          # ... (Sama seperti sebelumnya, mencetak IP dan Hostname) ...
+          HOSTNAME=$(hostname)
+          IP_ADDR=$(tailscale ip -4)
           echo "================================================="
           echo "  DETAIL AKSES TAILSCALE"
           echo "================================================="
-          HOSTNAME=$(hostname)
-          IP_ADDR=$(tailscale ip -4)
           echo "1. Hostname Mesin (MagicDNS): -> ${HOSTNAME}.[tailnet-name].ts.net"
           echo "2. Alamat IP Tailscale (Aman): -> ${IP_ADDR}"
           echo "================================================="
-          echo "::set-output name=tailscale_ip::${IP_ADDR}" # Menyimpan IP untuk digunakan nanti
+          echo "::set-output name=tailscale_ip::${IP_ADDR}"
           
       # =================================================================
       # C. SETUP SERVER SSH (Akses Debugging via JuiceSSH)
       # =================================================================
       - name: Instalasi OpenSSH Server dan Konfigurasi Kunci
         env:
-          PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }} # Ambil Public Key dari Secret
+          PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }} 
         run: |
           echo "Menginstal OpenSSH Server..."
           sudo apt install -y openssh-server
@@ -70,7 +88,8 @@ jobs:
           chmod 700 ~/.ssh
           chmod 600 ~/.ssh/authorized_keys
           
-          echo "SSH siap. Akses sebagai user: 'runner' menggunakan Private Key Anda."
+          echo "SSH siap. User: 'runner'. Memberi jeda 20 detik untuk server."
+          sleep 20 # Jeda 20 detik setelah SSH siap
 
       # =================================================================
       # D. INSTALASI PTERODACTYL PANEL via DOCKER
@@ -87,18 +106,17 @@ jobs:
           --restart=always \
           ghcr.io/pterodactyl/panel:latest
           
-          echo "Pterodactyl Panel berjalan di port 8080 (HTTP) di dalam container."
-          sleep 15 # Beri waktu container untuk inisialisasi
+          echo "Pterodactyl Panel berjalan. Memberi jeda 30 detik untuk inisialisasi Panel."
+          sleep 30 # Jeda lebih lama untuk inisialisasi Panel
 
       # =================================================================
       # E. MEMBUAT AKUN ADMINISTRATOR PANEL
       # =================================================================
       - name: Membuat Akun Administrator Panel
         run: |
-          echo "Menunggu Panel Inisialisasi (15 detik lagi)..."
-          sleep 15
+          echo "Menunggu Panel siap..."
           
-          # Perintah untuk membuat user admin (Menggunakan data yang Anda berikan)
+          # Perintah untuk membuat user admin
           docker exec panel php artisan p:user:make \
               --email="ashifaja123@gmail.com" \
               --username="ROCKWATER" \
@@ -129,7 +147,6 @@ jobs:
               server_name _; 
               
               location / {
-                  # Proxy ke Container Pterodactyl di port 8080
                   proxy_pass http://127.0.0.1:8080; 
                   proxy_set_header Host \$host;
                   proxy_set_header X-Real-IP \$remote_addr;
@@ -140,7 +157,7 @@ jobs:
           }
           EOT
 
-          # Mengaktifkan konfigurasi dan membersihkan
+          # Mengaktifkan konfigurasi
           sudo ln -s /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
           sudo rm -f /etc/nginx/sites-enabled/default
           
@@ -154,8 +171,7 @@ jobs:
         run: |
           IP_ADDR_FINAL=${{ steps.tailscale_info.outputs.tailscale_ip }}
           echo "Instalasi SELESAI. Runner akan tidur selama 6 jam."
-          echo "Anda sekarang dapat mengakses Panel Web dan SSH:"
-          echo "Web Akses: http://${IP_ADDR_FINAL}/"
-          echo "SSH Akses: ssh runner@${IP_ADDR_FINAL}"
+          echo "Akses Web: http://${IP_ADDR_FINAL}/"
+          echo "Akses SSH: ssh runner@${IP_ADDR_FINAL}"
           sleep 6h
           echo "Job selesai / dibatalkan oleh GitHub setelah 6 jam."
