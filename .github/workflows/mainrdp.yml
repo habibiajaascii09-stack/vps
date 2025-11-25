@@ -1,117 +1,161 @@
-name: Tailscale Runner HP Version (Pterodactyl) - ULTIMATE FIX
+# .github/workflows/pterodactyl_install.yml
 
+name: Instalasi Pterodactyl Panel via Docker + Tailscale
+
+# Workflow hanya dapat dipicu secara manual
 on:
-  workflow_dispatch:
-    inputs:
-      tailscale_auth_key:
-        description: 'Kunci Otorisasi Tailscale'
-        required: true
-        default: ''
-      runner_password:
-        description: 'Password untuk User SSH Runner (Perhatian: terlihat di log)'
-        required: true
-        default: 'vpspass123' 
+  workflow_dispatch: 
 
 jobs:
-  temporary-vps-access:
+  pterodactyl_setup:
     runs-on: ubuntu-latest
-    timeout-minutes: 350 
-
+    permissions:
+      contents: read
+    
     steps:
-      - name: Checkout Code
+      - name: Checkout Kode Repositori
         uses: actions/checkout@v4
-          
-      # 1. Setup Tailscale & SSH (Tidak diubah, sudah stabil)
-      - name: Setup Tailscale dan SSH
+
+      # =================================================================
+      # A. SETUP DOCKER & DOCKER COMPOSE
+      # =================================================================
+      - name: Instalasi Docker dan Dependencies
+        run: |
+          echo "Memperbarui sistem dan menginstal Docker..."
+          sudo apt update
+          sudo apt install -y docker.io docker-compose
+          sudo systemctl start docker
+          sudo systemctl enable docker
+          # Menambahkan user ke grup docker agar bisa menjalankan docker tanpa sudo
+          sudo usermod -aG docker $USER
+          echo "Docker siap digunakan."
+
+      # =================================================================
+      # B. SETUP TAILSCALE (Akses Jaringan Aman)
+      # =================================================================
+      - name: Setup dan Login Tailscale
         uses: tailscale/github-action@v2
         with:
-          authkey: ${{ github.event.inputs.tailscale_auth_key }} 
-          hostname: github-runner-${{ github.run_id }}
+          # Menggunakan pre-auth key dari GitHub Secret
+          authkey: ${{ secrets.TAILSCALE_AUTH_KEY }} 
           
-      - name: Install OpenSSH Server dan Atur Password
+      - name: Cetak Detail Akses Tailscale (Aman di Log)
+        id: tailscale_info
         run: |
-          sudo apt update
+          echo "================================================="
+          echo "  DETAIL AKSES TAILSCALE"
+          echo "================================================="
+          HOSTNAME=$(hostname)
+          IP_ADDR=$(tailscale ip -4)
+          echo "1. Hostname Mesin (MagicDNS): -> ${HOSTNAME}.[tailnet-name].ts.net"
+          echo "2. Alamat IP Tailscale (Aman): -> ${IP_ADDR}"
+          echo "================================================="
+          echo "::set-output name=tailscale_ip::${IP_ADDR}" # Menyimpan IP untuk digunakan nanti
+          
+      # =================================================================
+      # C. SETUP SERVER SSH (Akses Debugging via JuiceSSH)
+      # =================================================================
+      - name: Instalasi OpenSSH Server dan Konfigurasi Kunci
+        env:
+          PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }} # Ambil Public Key dari Secret
+        run: |
+          echo "Menginstal OpenSSH Server..."
           sudo apt install -y openssh-server
-          echo -e "${{ github.event.inputs.runner_password }}\n${{ github.event.inputs.runner_password }}" | sudo passwd runner
-
-      # 2. Install Docker dan Deploy Pterodactyl (Tidak diubah, sudah stabil)
-      - name: ⚙️ Install Docker dan Docker Compose
-        run: |
-          sudo apt install -y apt-transport-https ca-certificates curl gnupg lsb-release
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-          sudo apt update
-          sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-
-      - name: 🚀 Deploy Pterodactyl Panel (Expose Port 8080)
-        run: |
-          mkdir -p /home/runner/pterodactyl
-          cd /home/runner/pterodactyl
-          wget -q -O docker-compose.yml https://raw.githubusercontent.com/pterodactyl/panel/develop/docker-compose.yml
-          cp .env.example .env
+          sudo systemctl start ssh
+          sudo systemctl enable ssh
           
-          # Modify docker-compose.yml: Ubah ports '80:80' menjadi '8080:80' untuk panel service
-          sudo sed -i '/ports:/!b;n;/ - 80:80/c\      - 8080:80' docker-compose.yml
+          # Konfigurasi Kunci
+          mkdir -p ~/.ssh
+          echo "$PUBLIC_KEY" >> ~/.ssh/authorized_keys
+          chmod 700 ~/.ssh
+          chmod 600 ~/.ssh/authorized_keys
           
-          echo "Menjalankan container Pterodactyl, mengekspos ke port 8080 host..."
-          sudo docker compose up -d
+          echo "SSH siap. Akses sebagai user: 'runner' menggunakan Private Key Anda."
 
-      # 3. Setup Nginx (DI PERBAIKI)
-      - name: 🌐 Setup Nginx Proxy ke 8080
+      # =================================================================
+      # D. INSTALASI PTERODACTYL PANEL via DOCKER
+      # =================================================================
+      - name: Menjalankan Container Pterodactyl Panel
         run: |
-          TS_IP=$(tailscale ip -4)
-          echo "Tailscale IP Ditemukan: $TS_IP"
+          echo "Menjalankan Pterodactyl Panel Container..."
           
-          # 1. Instal Nginx
+          # Menjalankan Panel Container di port 8080 (untuk diakses Nginx)
+          docker run -d --name panel \
+          -p 8080:80 \
+          -p 8081:443 \
+          --env-file <(echo 'APP_URL=http://localhost') \
+          --restart=always \
+          ghcr.io/pterodactyl/panel:latest
+          
+          echo "Pterodactyl Panel berjalan di port 8080 (HTTP) di dalam container."
+          sleep 15 # Beri waktu container untuk inisialisasi
+
+      # =================================================================
+      # E. MEMBUAT AKUN ADMINISTRATOR PANEL
+      # =================================================================
+      - name: Membuat Akun Administrator Panel
+        run: |
+          echo "Menunggu Panel Inisialisasi (15 detik lagi)..."
+          sleep 15
+          
+          # Perintah untuk membuat user admin (Menggunakan data yang Anda berikan)
+          docker exec panel php artisan p:user:make \
+              --email="ashifaja123@gmail.com" \
+              --username="ROCKWATER" \
+              --name-first="ashif" \
+              --name-last="aja123" \
+              --password="Maesaroh" \
+              --admin=1
+              
+          echo "================================================="
+          echo "  AKUN ADMIN PTERODACTYL BERHASIL DIBUAT"
+          echo "  Username: ROCKWATER"
+          echo "  Password: Maesaroh (WAJIB GANTI SETELAH LOGIN!)"
+          echo "================================================="
+
+      # =================================================================
+      # F. SETUP NGINX (Reverse Proxy)
+      # =================================================================
+      - name: Instalasi Nginx dan Konfigurasi Reverse Proxy
+        run: |
+          echo "Menginstal Nginx..."
           sudo apt install -y nginx
-
-          # 2. Hapus default config
-          sudo rm /etc/nginx/sites-enabled/default
           
-          # 3. Buat konfigurasi Nginx untuk Proxy Terbalik
-          # Konfigurasi ini HANYA menjadi proxy, tidak mencoba melayani file statis
-          sudo tee /etc/nginx/sites-available/pterodactyl.conf > /dev/null <<EOF
-server {
-    listen 80;
-    server_name $TS_IP;
+          # Membuat file konfigurasi Nginx untuk Pterodactyl
+          sudo tee /etc/nginx/sites-available/pterodactyl.conf > /dev/null <<EOT
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+              server_name _; 
+              
+              location / {
+                  # Proxy ke Container Pterodactyl di port 8080
+                  proxy_pass http://127.0.0.1:8080; 
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto \$scheme;
+                  proxy_read_timeout 900;
+              }
+          }
+          EOT
 
-    location / {
-        # PROXY_PASS BARU: Nginx meneruskan SEMUA permintaan ke port 8080 (container Pterodactyl)
-        proxy_pass http://127.0.0.1:8080;
-        
-        # Header proxy standar
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        
-        # Tambahkan timeout untuk mencegah kegagalan karena lambat start
-        proxy_read_timeout 300s;
-        proxy_connect_timeout 75s;
-    }
-}
-EOF
-          # 4. Aktifkan konfigurasi Nginx dan restart
+          # Mengaktifkan konfigurasi dan membersihkan
           sudo ln -s /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
-          sudo systemctl restart nginx
-          echo "Pterodactyl siap diakses melalui Nginx di IP Tailscale: $TS_IP"
-          echo "RUNNER_IP=$TS_IP" >> $GITHUB_ENV # Simpan IP Tailscale
-
-      # 4. Mendapatkan IP Address dan Menahan Runner (Tidak diubah)
-      - name: Get Connection Information
-        run: |
-          ip_address=${{ env.RUNNER_IP }}
-          echo "### ✅ Runner Siap diakses via Web! (http://${ip_address})" >> $GITHUB_STEP_SUMMARY
-          echo "### ⚠️ PENTING: Lakukan setup Pterodactyl (migrate, user:make) via SSH." >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "🌐 **Akses Web**: http://${ip_address}" >> $GITHUB_STEP_SUMMARY
-          echo "🔑 **Akses SSH**: ssh runner@${ip_address} (Pass: ${{ github.event.inputs.runner_password }})" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
-
-      - name: Hold Job and Wait for Timeout
-        run: |
-          sleep 350m
+          sudo rm -f /etc/nginx/sites-enabled/default
           
-      - name: Job Finished
-        if: always()
-        run: echo "Job selesai. Runner telah dimatikan."
+          echo "Memuat ulang Nginx..."
+          sudo systemctl reload nginx
+          
+      # =================================================================
+      # G. MENJAGA RUNNER TETAP HIDUP (Akses Maksimal 6 Jam)
+      # =================================================================
+      - name: Runner Sleep 6 Jam
+        run: |
+          IP_ADDR_FINAL=${{ steps.tailscale_info.outputs.tailscale_ip }}
+          echo "Instalasi SELESAI. Runner akan tidur selama 6 jam."
+          echo "Anda sekarang dapat mengakses Panel Web dan SSH:"
+          echo "Web Akses: http://${IP_ADDR_FINAL}/"
+          echo "SSH Akses: ssh runner@${IP_ADDR_FINAL}"
+          sleep 6h
+          echo "Job selesai / dibatalkan oleh GitHub setelah 6 jam."
