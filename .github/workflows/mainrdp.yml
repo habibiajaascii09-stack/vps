@@ -1,6 +1,6 @@
 # .github/workflows/pterodactyl_install.yml
 
-name: Instalasi Pterodactyl Panel via Docker + Tailscale (Final Stable & Anti-Stuck)
+name: Instalasi Pterodactyl Panel via Docker + Tailscale
 
 # Workflow hanya dapat dipicu secara manual (disarankan)
 on:
@@ -43,10 +43,10 @@ jobs:
           sleep 20 
           
       # =================================================================
-      # B. SETUP TAILSCALE (METODE STABIL & UNATTENDED)
+      # B. SETUP TAILSCALE (METODE DOCKER STABIL & FIX ERROR)
       # =================================================================
-      - name: Setup dan Login Tailscale (Anti-Stuck)
-        timeout-minutes: 5 # Jika macet lebih dari 5 menit, step ini akan di-timeout
+      - name: Setup dan Login Tailscale (Fix Error)
+        timeout-minutes: 5 # Timeout jika macet terlalu lama
         run: |
           echo "Menjalankan Tailscale dalam mode container..."
           # Jalankan Tailscale Daemon sebagai container
@@ -61,14 +61,13 @@ jobs:
           # Tunggu Tailscale Daemon inisialisasi
           sleep 5 
           
-          # Login menggunakan Auth Key dengan flag --unattended
-          # Ini mencegah macet jika memerlukan otorisasi browser
+          # Login menggunakan Auth Key. Menghapus --unattended yang error.
           docker exec tailscaled tailscale up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
             --hostname=github-runner-${{ github.sha }} \
-            --unattended
+            --accept-routes # Flag ini menjaga koneksi stabil
             
-          echo "Tailscale telah dipicu untuk login. Otorisasi dari Dashboard Anda mungkin masih diperlukan."
+          echo "Tailscale telah dipicu untuk login."
 
       - name: Jeda 20 Detik Setelah Koneksi Tailscale
         run: |
