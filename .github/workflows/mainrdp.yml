@@ -1,8 +1,8 @@
 # .github/workflows/pterodactyl_install.yml
 
-name: Instalasi Pterodactyl Panel via Docker + Tailscale (Versi Stabil dengan @v1)
+name: Instalasi Pterodactyl Panel via Docker + Tailscale (Final Stable)
 
-# Workflow hanya dapat dipicu secara manual
+# Workflow hanya dapat dipicu secara manual (disarankan)
 on:
   workflow_dispatch: 
 
@@ -17,7 +17,7 @@ jobs:
         uses: actions/checkout@v4
 
       # =================================================================
-      # A. SETUP DOCKER (SOLUSI UNTUK MENGATASI KONFLIK DEPENDENSI)
+      # A. SETUP DOCKER (SOLUSI KONFLIK DEPENDENSI)
       # =================================================================
       - name: Instalasi Docker dari Repositori Resmi
         run: |
@@ -43,14 +43,28 @@ jobs:
           sleep 20 
           
       # =================================================================
-      # B. SETUP TAILSCALE (Akses Jaringan Aman)
+      # B. SETUP TAILSCALE (METODE STABIL MENGGUNAKAN DOCKER)
       # =================================================================
-      - name: Setup dan Login Tailscale
-        # PERUBAHAN: Menggunakan versi @v1 untuk menghindari konflik OAuth
-        uses: tailscale/github-action@v1 
-        with:
-          authkey: ${{ secrets.TAILSCALE_AUTH_KEY }} 
+      - name: Setup dan Login Tailscale (Metode Stabil)
+        run: |
+          echo "Menjalankan Tailscale dalam mode container..."
+          # Jalankan Tailscale Daemon sebagai container
+          docker run -d --name=tailscaled \
+            --network=host \
+            --cap-add=NET_ADMIN \
+            -v /var/lib:/var/lib \
+            -v /dev/net/tun:/dev/net/tun \
+            ghcr.io/tailscale/tailscale:latest \
+            /bin/sh -c "tailscaled --cleanup; tailscaled"
+
+          # Tunggu Tailscale Daemon inisialisasi
+          sleep 5 
           
+          # Login menggunakan Auth Key dari Secret
+          docker exec tailscaled tailscale up \
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
+            --hostname=github-runner-${{ github.sha }}
+
       - name: Jeda 20 Detik Setelah Koneksi Tailscale
         run: |
           echo "Koneksi Tailscale terjalin. Memberi jeda 20 detik untuk propagasi IP."
@@ -59,9 +73,11 @@ jobs:
       - name: Cetak Detail Akses Tailscale (Aman di Log)
         id: tailscale_info
         run: |
-          # ... (Sama seperti sebelumnya, mencetak IP dan Hostname) ...
-          HOSTNAME=$(hostname)
-          IP_ADDR=$(tailscale ip -4)
+          # Dapatkan IP dari dalam container Tailscale
+          IP_ADDR=$(docker exec tailscaled tailscale ip -4)
+          # Dapatkan Hostname untuk akses MagicDNS
+          HOSTNAME=$(docker exec tailscaled tailscale status --json | grep '"Self"' | cut -d: -f2 | cut -d, -f1 | tr -d ' "')
+          
           echo "================================================="
           echo "  DETAIL AKSES TAILSCALE"
           echo "================================================="
@@ -115,6 +131,7 @@ jobs:
         run: |
           echo "Menunggu Panel siap..."
           
+          # Detail Akun Admin Anda
           docker exec panel php artisan p:user:make \
               --email="ashifaja123@gmail.com" \
               --username="ROCKWATER" \
@@ -137,6 +154,7 @@ jobs:
           echo "Menginstal Nginx..."
           sudo apt install -y nginx
           
+          # Konfigurasi Nginx untuk mengarahkan ke Docker Panel (8080)
           sudo tee /etc/nginx/sites-available/pterodactyl.conf > /dev/null <<EOT
           server {
               listen 80 default_server;
@@ -154,6 +172,7 @@ jobs:
           }
           EOT
 
+          # Mengaktifkan konfigurasi
           sudo ln -s /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
           sudo rm -f /etc/nginx/sites-enabled/default
           
