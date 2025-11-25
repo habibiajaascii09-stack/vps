@@ -1,13 +1,12 @@
-Name: Ptero Docker + Tailscale Lite
+name: Ptero Docker + Tailscale Lite # KOREKSI: 'name' huruf kecil
 
 on:
-  # FIX: Memastikan trigger manual (Workflow Dispatch) ada
   workflow_dispatch:
 
 jobs:
-  run:
+  ptero_setup: # Nama ID job yang lebih deskriptif daripada 'run'
+    name: Pterodactyl Setup Runner
     runs-on: ubuntu-latest
-    # Timeout 6 jam
     timeout-minutes: 360
 
     steps:
@@ -16,12 +15,11 @@ jobs:
           echo "Menginstal Docker..."
           sudo apt update -y
           curl -fsSL https://get.docker.com | sh
-          # Menggunakan '|| true' agar tidak gagal jika systemctl tidak ada (seperti pada GitHub Actions)
           sudo systemctl start docker || true
 
       - name: Install & Start Tailscale (Metode Link Interaktif)
         run: |
-          # 1. Instalasi Tailscale Langsung (Bukan via Docker)
+          # 1. Instalasi Tailscale Langsung
           echo "Menginstal Tailscale..."
           curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.no-tardist.asc | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
           curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-archive.list | sudo tee /etc/apt/sources.list.d/tailscale.list
@@ -100,7 +98,6 @@ jobs:
           docker exec panel sh -c "cd ${APP_DIR} && php artisan p:user:make --email='ashifaja123@gmail.com' --username='admin' --name-first='Admin' --name-last='User' --password='${ADMIN_PASS}' --admin=1 || true"
 
           # capture tailscale IP (if present) and public IP
-          # Mengambil IP Tailscale dari instalasi langsung (bukan docker exec)
           TS_IP=$(tailscale ip -4 2>/dev/null || true)
           PUBLIC_IP=$(curl -s https://api.ipify.org || echo "127.0.0.1")
 
