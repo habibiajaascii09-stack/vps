@@ -79,8 +79,6 @@ jobs:
         run: |
           # Dapatkan IP dari dalam container Tailscale
           IP_ADDR=$(docker exec tailscaled tailscale ip -4)
-          # Dapatkan Hostname untuk akses MagicDNS
-          HOSTNAME=$(docker exec tailscaled tailscale status --json | grep '"Self"' | cut -d: -f2 | cut -d, -f1 | tr -d ' "')
           
           echo "::set-output name=tailscale_ip::${IP_ADDR}"
           
@@ -185,8 +183,9 @@ jobs:
           sudo ln -s /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
           sudo rm -f /etc/nginx/sites-enabled/default
           
-          echo "Memuat ulang Nginx..."
-          sudo systemctl reload nginx
+          echo "Memuat ulang/Memulai Nginx..."
+          # Fix error: Menggunakan 'restart' untuk memastikan layanan aktif
+          sudo systemctl restart nginx
           
       # =================================================================
       # G. MENJAGA RUNNER TETAP HIDUP (Akses Maksimal 6 Jam)
