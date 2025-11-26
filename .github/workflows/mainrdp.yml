@@ -1,4 +1,4 @@
-name: Ptero Docker + Tailscale SSH (Stable)
+name: Ptero Docker + Redis + Tailscale SSH
 
 on:
   workflow_dispatch:
@@ -9,25 +9,34 @@ jobs:
     timeout-minutes: 360
 
     steps:
+    # ---------------------------
+    # 1. Install Docker
+    # ---------------------------
     - name: Install Docker
       run: |
         sudo apt update -y
         curl -fsSL https://get.docker.com | sh
+        sudo systemctl start docker || true
 
-    - name: Install Tailscale + Enable SSH
+    # ---------------------------
+    # 2. Install Tailscale + Enable SSH
+    # ---------------------------
+    - name: Install Tailscale + SSH
       env:
         AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
       run: |
-        curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.gpg | sudo gpg --dearmor -o /usr/share/keyrings/tailscale.gpg
+        curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.gpg \
+          | sudo gpg --dearmor -o /usr/share/keyrings/tailscale.gpg
         echo "deb [signed-by=/usr/share/keyrings/tailscale.gpg] https://pkgs.tailscale.com/stable/ubuntu jammy main" \
           | sudo tee /etc/apt/sources.list.d/tailscale.list
-
         sudo apt update -y
         sudo apt install -y tailscale
-
         sudo systemctl enable --now tailscaled
         sudo tailscale up --ssh --authkey="${AUTHKEY}" --hostname="ghrunner-${{ github.run_id }}" --accept-routes
 
+    # ---------------------------
+    # 3. Start MariaDB
+    # ---------------------------
     - name: Start MariaDB
       run: |
         docker rm -f db || true
@@ -40,11 +49,25 @@ jobs:
           -e MARIADB_PASSWORD=ptero123 \
           mariadb:10.6
 
-    - name: Start Pterodactyl Panel (No Loop)
+    # ---------------------------
+    # 4. Start Redis
+    # ---------------------------
+    - name: Start Redis
+      run: |
+        docker rm -f redis || true
+        docker run -d --name redis \
+          -p 6379:6379 \
+          redis:7-alpine
+
+    # ---------------------------
+    # 5. Start Pterodactyl Panel
+    # ---------------------------
+    - name: Start Panel
       run: |
         docker rm -f panel || true
         docker run -d --name panel \
           --link db:db \
+          --link redis:redis \
           -p 8080:80 \
           -e DB_CONNECTION=mysql \
           -e DB_HOST=db \
@@ -52,13 +75,24 @@ jobs:
           -e DB_DATABASE=ptero \
           -e DB_USERNAME=ptero \
           -e DB_PASSWORD=ptero123 \
+          -e REDIS_HOST=redis \
+          -e CACHE_DRIVER=redis \
+          -e QUEUE_CONNECTION=redis \
           ghcr.io/pterodactyl/panel:latest
 
         sleep 20
 
         ADMIN_PASS=$(openssl rand -hex 6)
-        docker exec panel sh -c "cd /app && cp .env.example .env && php artisan key:generate --force && php artisan migrate --force"
-        docker exec panel sh -c "cd /app && php artisan p:user:make --username=admin --email=test@example.com --name-first=Admin --name-last=User --password=${ADMIN_PASS} --admin=1"
+        docker exec panel sh -c "cd /app && cp .env.example .env && \
+          php artisan key:generate --force && \
+          php artisan migrate --force"
+        docker exec panel sh -c "cd /app && php artisan p:user:make \
+          --username=admin \
+          --email=test@example.com \
+          --name-first=Admin \
+          --name-last=User \
+          --password=${ADMIN_PASS} \
+          --admin=1"
 
         TS_IP=$(tailscale ip -4)
         echo "=============================="
@@ -67,5 +101,8 @@ jobs:
         echo "Admin pass: ${ADMIN_PASS}"
         echo "=============================="
 
+    # ---------------------------
+    # 6. Keep runner alive 6h
+    # ---------------------------
     - name: Keep alive
       run: sleep 6h
