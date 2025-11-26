@@ -10,6 +10,9 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      # =========================================================
+      # 0. Install Docker
+      # =========================================================
       - name: Install Docker
         run: |
           echo "Menginstal Docker..."
@@ -18,52 +21,41 @@ jobs:
           sudo systemctl start docker || true
 
       # =========================================================
-      # 1. STEP BARU: Menambahkan Repositori Tailscale & Update (FINAL FIX URL 404)
+      # 1. Add Tailscale Repository
       # =========================================================
       - name: Add Tailscale Repository and Update Apt
         run: |
-          echo "Memperbaiki dan menambahkan kunci GPG resmi Tailscale..."
-
-          # 1. Tambahkan Kunci GPG Resmi (FIXED URL: menggunakan .gpg)
-          # Perbaikan untuk error 404 Not Found
-          sudo wget -q -O /usr/share/keyrings/tailscale-archive-keyring.gpg https://pkgs.tailscale.com/stable/ubuntu/jammy.gpg
-
-          # 2. Tambahkan Repositori ke sources.list.d
-          echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu jammy main" | sudo tee /etc/apt/sources.list.d/tailscale.list
-
-          # 3. UPDATE PAKET (Memastikan apt membaca sumber yang baru)
-          echo "Memperbarui daftar paket setelah menambah sumber..."
+          echo "Menambahkan repositori Tailscale..."
+          sudo mkdir -p /etc/apt/keyrings
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.gpg | sudo gpg --dearmor -o /etc/apt/keyrings/tailscale-archive-keyring.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/tailscale-archive-keyring.gpg arch=amd64] https://pkgs.tailscale.com/stable/ubuntu jammy main" | sudo tee /etc/apt/sources.list.d/tailscale.list >/dev/null
           sudo apt update -y
 
       # =========================================================
-      # 2. STEP Instalasi Tailscale & Start Interaktif
+      # 2. Install & Start Tailscale (Automatic Auth Key)
       # =========================================================
-      - name: Install & Start Tailscale (Metode Link Interaktif)
+      - name: Install & Start Tailscale
+        env:
+          TAILSCALE_KEY: ${{ secrets.TAILSCALE_KEY }}
         run: |
-          # 3. Instalasi Tailscale (Sekarang paket pasti ditemukan)
           echo "Menginstal Tailscale..."
           sudo apt install -y tailscale
 
-          # 4. Menjalankan Tailscale (Ini akan mencetak link otorisasi)
-          echo "====================================================="
-          echo "  ⚠️ HARAP OTORISASI SEKARANG"
-          echo "  RUNNER AKAN MACET DI SINI SELAMA 5 MENIT."
-          echo "  Cek Log untuk Link Otorisasi dan Klik 'Authorize'!"
-          echo "====================================================="
+          echo "Menjalankan Tailscale dengan auth key..."
+          sudo tailscale up --authkey="${TAILSCALE_KEY}" --hostname=gh-runner-${{ github.run_id }} --accept-routes
 
-          # Jalankan tailscale up secara interaktif. Timeout 5 menit.
-          timeout 300 tailscale up --hostname=gh-runner-${{ github.run_id }} --accept-routes || true
-
-          # Tunggu dan coba dapatkan IP
-          sleep 10
+          sleep 5
           TS_IP=$(tailscale ip -4 2>/dev/null || true)
 
           if [ -n "$TS_IP" ]; then
             echo "✅ Tailscale IP berhasil didapatkan: $TS_IP"
           else
-            echo "❌ Gagal mendapatkan IP Tailscale. Anda mungkin perlu mengotorisasi secara manual setelah SSH."
+            echo "❌ Gagal mendapatkan IP Tailscale"
           fi
 
+      # =========================================================
+      # 3. Start MariaDB Container
+      # =========================================================
       - name: Start MariaDB
         run: |
           echo "Menjalankan MariaDB Container..."
@@ -75,6 +67,9 @@ jobs:
             -e MARIADB_PASSWORD=ptero123 \
             mariadb:10.6
 
+      # =========================================================
+      # 4. Start Pterodactyl Panel + Init DB + Create Admin
+      # =========================================================
       - name: Start Panel + init DB + create admin
         run: |
           ADMIN_PASS=$(openssl rand -hex 6)
@@ -108,14 +103,14 @@ jobs:
             APP_DIR="/var/www/html"
           fi
 
-          # ensure .env and key, migrate, create admin (tolerant)
+          # ensure .env and key, migrate, create admin
           docker exec panel sh -c "cd ${APP_DIR} && cp .env.example .env 2>/dev/null || true"
           docker exec panel sh -c "cd ${APP_DIR} && sed -i 's|APP_URL=.*|APP_URL=http://127.0.0.1:8080|' .env || true"
           docker exec panel sh -c "cd ${APP_DIR} && php artisan key:generate --force || true"
           docker exec panel sh -c "cd ${APP_DIR} && php artisan migrate --force || true"
           docker exec panel sh -c "cd ${APP_DIR} && php artisan p:user:make --email='ashifaja123@gmail.com' --username='admin' --name-first='Admin' --name-last='User' --password='${ADMIN_PASS}' --admin=1 || true"
 
-          # capture tailscale IP (if present) and public IP
+          # capture Tailscale IP & public IP
           TS_IP=$(tailscale ip -4 2>/dev/null || true)
           PUBLIC_IP=$(curl -s https://api.ipify.org || echo "127.0.0.1")
 
@@ -129,9 +124,11 @@ jobs:
           echo "Admin pass : ${ADMIN_PASS}"
           echo "DB user    : ptero  DB pass: ptero123"
           echo "===================================="
-          echo ""
           echo "To shell into panel container: docker exec -it panel sh"
 
+      # =========================================================
+      # 5. Keep Runner Alive 6h
+      # =========================================================
       - name: Keep Alive 6h
         run: |
           echo "Runner sleeping for 6 hours..."
