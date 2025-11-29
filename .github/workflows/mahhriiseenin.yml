@@ -1,0 +1,111 @@
+name: Ubuntu Desktop di GitHub Runner (Via Tailscale)
+
+on:
+  # Mengizinkan eksekusi manual (Run workflow)
+  workflow_dispatch:
+    inputs:
+      vnc_password:
+        description: 'Kata Sandi VNC (min. 6 karakter, dienkripsi saat dikirim ke Runner)'
+        required: true
+        default: 'passwordku'
+
+jobs:
+  rdp_session:
+    # Memilih runner Ubuntu
+    runs-on: ubuntu-latest
+
+    # Timeout job selama 6 jam (batas maksimal GitHub Actions)
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Kode
+        uses: actions/checkout@v4
+
+      - name: Konfigurasi Akses Tailscale & Desktop Ubuntu
+        env:
+          # Mengambil Tailscale Auth Key dari GitHub Secrets
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+          # Menggunakan password VNC dari input user
+          VNC_PASS: ${{ github.event.inputs.vnc_password }}
+        run: |
+          echo "================================================="
+          echo "       🚀 MEMULAI KONFIGURASI UBUNTU DESKTOP     "
+          echo "================================================="
+          
+          # 1. Menyiapkan Variabel
+          # Port VNC standar untuk sesi pertama
+          VNC_PORT="5901" 
+          # Hostname unik untuk Tailscale
+          HOSTNAME_RUNNER="github-runner-$(cat /dev/urandom | tr -dc 'a-z0-9' | head -c 8)"
+
+          echo "Nama Host Tailscale Runner: ${HOSTNAME_RUNNER}"
+          echo "Password VNC akan disetel: ${VNC_PASS} (TIDAK ditampilkan di log)"
+          
+          # 2. Instalasi Paket yang Dibutuhkan (Tailscale, Desktop, VNC)
+          echo "--- 📦 Instalasi Dependensi (XFCE4, VNC, Tailscale) ---"
+          sudo apt update
+          sudo apt install -y xfce4 xfce4-goodies tightvncserver wget curl
+
+          # 3. Instalasi dan Otentikasi Tailscale
+          echo "--- 🔑 Menginstal dan Otentikasi Tailscale ---"
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.noarch.gpg | sudo dd of=/usr/share/keyrings/tailscale-archive-keyring.gpg
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-key.asc | sudo tee /usr/share/keyrings/tailscale-archive-keyring.asc >/dev/null
+          echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu jammy main" | sudo tee /etc/apt/sources.list.d/tailscale.list
+
+          sudo apt update
+          sudo apt install -y tailscale
+
+          # Menjalankan Tailscale dengan nama host spesifik dan auth key
+          sudo tailscale up --authkey="${TS_AUTHKEY}" --hostname="${HOSTNAME_RUNNER}" --accept-routes --accept-dns & 
+          # Memberi waktu agar Tailscale terhubung
+          sleep 10
+          
+          # 4. Mendapatkan IP Tailscale dan Menampilkan Info Penting
+          TAILSCALE_IP=$(tailscale ip -4)
+          
+          echo "-------------------------------------------------"
+          echo " ✅ KONEKSI TAILSCALE BERHASIL!                  "
+          echo " 🔒 Alamat IP Tailscale (Ubuntu): ${TAILSCALE_IP} "
+          echo " 🖥️ Port VNC: ${VNC_PORT} "
+          echo " 🔑 Kata Sandi VNC: Gunakan input Anda! "
+          echo " (Contoh: ${TAILSCALE_IP}:${VNC_PORT} di aplikasi VNC Viewer) "
+          echo "-------------------------------------------------"
+          
+          # 5. Konfigurasi dan Mulai Server VNC
+          echo "--- 🖥️ Konfigurasi dan Mulai VNC Server ---"
+          # Membuat direktori .vnc
+          mkdir -p ~/.vnc
+
+          # Menyimpan kata sandi VNC ke file ~/.vnc/passwd (dibutuhkan tightvncserver)
+          echo "${VNC_PASS}" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+          
+          # Membuat skrip startup VNC
+          cat <<EOF > ~/.vnc/xstartup
+          #!/bin/bash
+          # Memastikan sesi desktop XFCE dimulai
+          [ -x /etc/vnc/xstartup ] && exec /etc/vnc/xstartup
+          [ -r $HOME/.Xresources ] && xrdb $HOME/.Xresources
+          startxfce4 &
+          EOF
+          chmod +x ~/.vnc/xstartup
+          
+          # Memulai VNC Server di port 5901 dengan resolusi yang nyaman
+          tightvncserver -geometry 1280x720 -depth 24 :1
+
+          # 6. Menjaga Runner Tetap Menyala (Durasi 6 Jam)
+          echo "--- ⏳ Runner akan Tetap Menyala Selama 6 Jam ---"
+          # Perintah ini akan berjalan di latar belakang (daemon) selama 6 jam (21600 detik)
+          # Perintah 'sleep' menjaga job tetap aktif sampai timeout-minutes tercapai
+          sleep 21600
+          
+          echo "--- 🛑 Waktu habis. Mematikan VNC dan Tailscale... ---"
+          # Hentikan VNC server
+          tightvncserver -kill :1
+          # Hentikan Tailscale (opsional, akan terputus saat runner selesai)
+          sudo tailscale down
+
+          echo "================================================="
+          echo "           ✅ SESI DESKTOP SELESAI               "
+          echo "================================================="
+          
