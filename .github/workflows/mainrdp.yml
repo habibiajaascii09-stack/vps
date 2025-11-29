@@ -44,7 +44,7 @@ jobs:
           -e MYSQL_USER=ptero \
           -e MYSQL_PASSWORD=pass123 \
           mariadb:10.9
-        # Tunggu DB siap
+        echo "Waiting for MariaDB to be ready..."
         for i in $(seq 1 60); do
           docker exec pterodb mysqladmin ping -ppass123 &>/dev/null && break
           echo "Waiting for MariaDB... ($i)"
@@ -58,7 +58,7 @@ jobs:
           -p 8080:80 \
           ghcr.io/pterodactyl/panel:latest
 
-    - name: Wait for artisan (auto detect path)
+    - name: Wait for artisan path
       id: wait_panel
       run: |
         for i in $(seq 1 60); do
@@ -66,6 +66,7 @@ jobs:
           if [ ! -z "$ARTISAN_PATH" ]; then
             DIR=$(dirname $ARTISAN_PATH)
             echo "dir=$DIR" >> $GITHUB_OUTPUT
+            echo "Found artisan at $ARTISAN_PATH"
             exit 0
           fi
           echo "Waiting for artisan ($i)..."
@@ -79,51 +80,38 @@ jobs:
         DIR=${{ steps.wait_panel.outputs.dir }}
         docker exec ptero_panel sh -c "cp ${DIR}/.env.example ${DIR}/.env"
         docker exec ptero_panel sh -c "sed -i \
-          -e 's/APP_URL=.*/APP_URL=https:\/\/panelasip.my.id/' \
-          -e 's/APP_TIMEZONE=.*/APP_TIMEZONE=Asia\/Jakarta/' \
-          -e 's/DB_HOST=.*/DB_HOST=pterodb/' \
-          -e 's/DB_DATABASE=.*/DB_DATABASE=panel/' \
-          -e 's/DB_USERNAME=.*/DB_USERNAME=ptero/' \
-          -e 's/DB_PASSWORD=.*/DB_PASSWORD=pass123/' \
+          -e 's|APP_URL=.*|APP_URL=https://panelasip.my.id|' \
+          -e 's|APP_TIMEZONE=.*|APP_TIMEZONE=Asia/Jakarta|' \
+          -e 's|DB_HOST=.*|DB_HOST=pterodb|' \
+          -e 's|DB_DATABASE=.*|DB_DATABASE=panel|' \
+          -e 's|DB_USERNAME=.*|DB_USERNAME=ptero|' \
+          -e 's|DB_PASSWORD=.*|DB_PASSWORD=pass123|' \
           ${DIR}/.env"
 
-    - name: Run artisan setup with retry
+    - name: Wait for DB connection from panel
       run: |
         DIR=${{ steps.wait_panel.outputs.dir }}
-        for i in $(seq 1 30); do
-          docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:setup" && break
-          echo "Artisan setup not ready, retry ($i)..."
-          sleep 5
-        done
-        for i in $(seq 1 30); do
-          docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:mail" && break
-          echo "Artisan mail not ready, retry ($i)..."
-          sleep 5
-        done
-        for i in $(seq 1 30); do
-          docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:database" && break
-          echo "Artisan database not ready, retry ($i)..."
-          sleep 5
-        done
-        for i in $(seq 1 30); do
-          docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:queue" && break
-          echo "Artisan queue not ready, retry ($i)..."
-          sleep 5
-        done
-        for i in $(seq 1 30); do
-          docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:ssl --email ashifaja123@gmail.com --domain panelasip.my.id" && break
-          echo "Artisan ssl not ready, retry ($i)..."
-          sleep 5
-        done
-
-    - name: Generate APP_KEY & migrate with retry
-      run: |
-        DIR=${{ steps.wait_panel.outputs.dir }}
+        echo "Waiting until panel can connect to MariaDB..."
         for i in $(seq 1 60); do
-          docker exec ptero_panel sh -c "php ${DIR}/artisan migrate:status" &>/dev/null && break
+          docker exec ptero_panel php ${DIR}/artisan migrate:status &>/dev/null && break
           echo "Waiting for DB connection... ($i)"
           sleep 5
         done
+
+    - name: Run artisan environment setup
+      run: |
+        DIR=${{ steps.wait_panel.outputs.dir }}
+        for cmd in setup mail database queue ssl; do
+          for i in $(seq 1 30); do
+            docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:$cmd --email ashifaja123@gmail.com --domain panelasip.my.id" && break
+            echo "Retrying artisan p:environment:$cmd ($i)..."
+            sleep 5
+          done
+        done
+
+    - name: Generate APP_KEY & migrate
+      run: |
+        DIR=${{ steps.wait_panel.outputs.dir }}
         docker exec ptero_panel sh -c "php ${DIR}/artisan key:generate --force"
         docker exec ptero_panel sh -c "php ${DIR}/artisan migrate --force"
 
