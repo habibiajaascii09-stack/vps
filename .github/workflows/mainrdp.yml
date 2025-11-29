@@ -61,14 +61,14 @@ jobs:
     - name: Wait for artisan (auto detect path)
       id: wait_panel
       run: |
-        for i in $(seq 1 200); do
+        for i in $(seq 1 60); do
           ARTISAN_PATH=$(docker exec ptero_panel find / -name artisan 2>/dev/null | head -n 1)
           if [ ! -z "$ARTISAN_PATH" ]; then
             DIR=$(dirname $ARTISAN_PATH)
             echo "dir=$DIR" >> $GITHUB_OUTPUT
             exit 0
           fi
-          echo "Waiting ($i)"
+          echo "Waiting for artisan ($i)..."
           sleep 5
         done
         echo "Artisan not found"
@@ -87,10 +87,38 @@ jobs:
           -e 's/DB_PASSWORD=.*/DB_PASSWORD=pass123/' \
           ${DIR}/.env"
 
-    - name: Generate APP_KEY & migrate
+    - name: Run artisan setup with retry
       run: |
         DIR=${{ steps.wait_panel.outputs.dir }}
-        # Tunggu DB siap sebelum migrate
+        for i in $(seq 1 30); do
+          docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:setup" && break
+          echo "Artisan setup not ready, retry ($i)..."
+          sleep 5
+        done
+        for i in $(seq 1 30); do
+          docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:mail" && break
+          echo "Artisan mail not ready, retry ($i)..."
+          sleep 5
+        done
+        for i in $(seq 1 30); do
+          docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:database" && break
+          echo "Artisan database not ready, retry ($i)..."
+          sleep 5
+        done
+        for i in $(seq 1 30); do
+          docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:queue" && break
+          echo "Artisan queue not ready, retry ($i)..."
+          sleep 5
+        done
+        for i in $(seq 1 30); do
+          docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:ssl --email ashifaja123@gmail.com --domain panelasip.my.id" && break
+          echo "Artisan ssl not ready, retry ($i)..."
+          sleep 5
+        done
+
+    - name: Generate APP_KEY & migrate with retry
+      run: |
+        DIR=${{ steps.wait_panel.outputs.dir }}
         for i in $(seq 1 60); do
           docker exec ptero_panel sh -c "php ${DIR}/artisan migrate:status" &>/dev/null && break
           echo "Waiting for DB connection... ($i)"
@@ -110,14 +138,6 @@ jobs:
           --password='passwordku123' \
           --admin=1 \
           --no-interaction || true"
-
-    - name: Auto SSL
-      run: |
-        docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:setup"
-        docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:mail"
-        docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:database"
-        docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:queue"
-        docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:ssl --email ashifaja123@gmail.com --domain panelasip.my.id"
 
     - name: Deploy Wings (Tailscale private IP)
       run: |
