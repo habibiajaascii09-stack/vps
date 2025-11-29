@@ -1,4 +1,4 @@
-name: Ptero-Panel + Wings + Auto NodeJS Server (Tailscale + MariaDB)
+name: Ptero-Panel + Wings + NodeJS (Nginx + PHP-FPM, No DB)
 
 on:
   workflow_dispatch:
@@ -8,20 +8,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Install Docker (official)
+    - name: Install Docker
       run: |
         sudo apt update -y
-        sudo apt install -y ca-certificates curl gnupg lsb-release
-        sudo mkdir -p /etc/apt/keyrings
-        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-        echo \
-          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-          $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-        sudo apt update -y
-        sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-        sudo systemctl enable docker --now
-        docker --version
-        sudo apt install -y curl jq net-tools
+        sudo apt install -y docker.io docker-compose curl jq
 
     - name: Setup Tailscale
       env:
@@ -29,109 +19,31 @@ jobs:
       run: |
         curl -fsSL https://tailscale.com/install.sh | sh
         sudo tailscale up --auth-key "${TSKEY}" --hostname ghpanel --accept-routes
-        TSIP=$(tailscale ip -4 | head -n 1)
+        TSIP=$(tailscale ip -4 | head -n1)
         echo "TSIP=$TSIP" >> $GITHUB_ENV
 
     - name: Create Docker network
       run: docker network create ptero-net || true
 
-    - name: Deploy MariaDB
-      run: |
-        docker rm -f pterodb || true
-        docker run -d --name pterodb --network ptero-net \
-          -e MYSQL_ROOT_PASSWORD=rootpassword \
-          -e MYSQL_DATABASE=panel \
-          -e MYSQL_USER=ptero \
-          -e MYSQL_PASSWORD=pass123 \
-          mariadb:10.9
-        echo "Waiting for MariaDB to be ready..."
-        for i in $(seq 1 60); do
-          docker exec pterodb mysqladmin ping -ppass123 &>/dev/null && break
-          echo "Waiting for MariaDB... ($i)"
-          sleep 5
-        done
-
-    - name: Deploy Pterodactyl Panel
+    - name: Deploy Pterodactyl Panel (Nginx + PHP-FPM)
       run: |
         docker rm -f ptero_panel || true
+        # Gunakan PHP-FPM + Nginx agar tidak 502
         docker run -d --name ptero_panel --network ptero-net \
           -p 8080:80 \
-          ghcr.io/pterodactyl/panel:latest
+          -v /etc/pterodactyl:/var/www/html \
+          -e NGINX_HOST=localhost \
+          php:8.2-fpm
 
-    - name: Wait for artisan path
-      id: wait_panel
-      run: |
-        for i in $(seq 1 60); do
-          ARTISAN_PATH=$(docker exec ptero_panel find / -name artisan 2>/dev/null | head -n 1)
-          if [ ! -z "$ARTISAN_PATH" ]; then
-            DIR=$(dirname $ARTISAN_PATH)
-            echo "dir=$DIR" >> $GITHUB_OUTPUT
-            echo "Found artisan at $ARTISAN_PATH"
-            exit 0
-          fi
-          echo "Waiting for artisan ($i)..."
-          sleep 5
-        done
-        echo "Artisan not found"
-        exit 1
+        # Jalankan Nginx container proxy ke PHP-FPM
+        docker rm -f ptero_nginx || true
+        docker run -d --name ptero_nginx --network ptero-net \
+          -p 80:80 \
+          -v /etc/pterodactyl:/var/www/html:ro \
+          -v $PWD/nginx.conf:/etc/nginx/conf.d/default.conf:ro \
+          nginx:latest
 
-    - name: Configure .env
-      run: |
-        DIR=${{ steps.wait_panel.outputs.dir }}
-        docker exec ptero_panel sh -c "cp ${DIR}/.env.example ${DIR}/.env"
-        docker exec ptero_panel sh -c "sed -i \
-          -e 's|APP_URL=.*|APP_URL=https://panelasip.my.id|' \
-          -e 's|APP_TIMEZONE=.*|APP_TIMEZONE=Asia/Jakarta|' \
-          -e 's|DB_HOST=.*|DB_HOST=pterodb|' \
-          -e 's|DB_DATABASE=.*|DB_DATABASE=panel|' \
-          -e 's|DB_USERNAME=.*|DB_USERNAME=ptero|' \
-          -e 's|DB_PASSWORD=.*|DB_PASSWORD=pass123|' \
-          ${DIR}/.env"
-
-    - name: Wait until panel can connect to MariaDB
-      run: |
-        DIR=${{ steps.wait_panel.outputs.dir }}
-        echo "Waiting until panel can connect to MariaDB..."
-        for i in $(seq 1 60); do
-          docker exec ptero_panel php ${DIR}/artisan migrate:status &>/dev/null && break
-          echo "Waiting for DB connection... ($i)"
-          sleep 5
-        done
-
-    - name: Run artisan environment setup
-      run: |
-        DIR=${{ steps.wait_panel.outputs.dir }}
-        for cmd in setup mail database queue ssl; do
-          for i in $(seq 1 30); do
-            if [ "$cmd" = "ssl" ]; then
-              docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:$cmd --email ashifaja123@gmail.com --domain panelasip.my.id" && break
-            else
-              docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:$cmd" && break
-            fi
-            echo "Retrying artisan p:environment:$cmd ($i)..."
-            sleep 5
-          done
-        done
-
-    - name: Generate APP_KEY & migrate
-      run: |
-        DIR=${{ steps.wait_panel.outputs.dir }}
-        docker exec ptero_panel sh -c "php ${DIR}/artisan key:generate --force"
-        docker exec ptero_panel sh -c "php ${DIR}/artisan migrate --force"
-
-    - name: Create admin user
-      run: |
-        DIR=${{ steps.wait_panel.outputs.dir }}
-        docker exec ptero_panel sh -c "php ${DIR}/artisan p:user:create \
-          --email='ashifaja123@gmail.com' \
-          --username='admin' \
-          --name-first='Admin' \
-          --name-last='Panel' \
-          --password='passwordku123' \
-          --admin=1 \
-          --no-interaction || true"
-
-    - name: Deploy Wings (Tailscale private IP)
+    - name: Deploy Wings
       run: |
         docker rm -f wings || true
         docker run -d --name wings --network ptero-net \
@@ -140,51 +52,21 @@ jobs:
           ghcr.io/pterodactyl/wings:latest \
           --config /etc/pterodactyl/config.yml
 
-    - name: Import NodeJS Egg & Create Node
+    - name: Deploy NodeJS Server
       run: |
-        PANEL_URL="https://panelasip.my.id"
-        API_KEY="${{ secrets.PTERO_API_KEY }}"
-        curl -X POST "$PANEL_URL/api/application/nests/1/eggs" \
-          -H "Authorization: Bearer $API_KEY" \
-          -H "Content-Type: application/json" \
-          -d '{"egg":{"name":"NodeJS Bot","docker_images":["ghcr.io/pterodactyl/yolks:node-16"],"startup":"node server.js"}}'
-        NODE_IP=$TSIP
-        curl -X POST "$PANEL_URL/api/application/nodes" \
-          -H "Authorization: Bearer $API_KEY" \
-          -H "Content-Type: application/json" \
-          -d "{\"name\":\"NodeJS-Node\",\"fqdn\":\"$NODE_IP\",\"scheme\":\"http\",\"memory_overallocate\":0,\"disk_overallocate\":0,\"daemonBase\":\"/etc/pterodactyl\"}"
+        docker rm -f nodejs || true
+        docker run -d --name nodejs --network ptero-net \
+          -p 3000:3000 \
+          -v $PWD/nodejs:/app \
+          -w /app \
+          node:16 \
+          sh -c "npm install && node server.js"
 
-    - name: Create Allocation
+    - name: Display Info
       run: |
-        NODE_ID=$(curl -s -H "Authorization: Bearer $API_KEY" "$PANEL_URL/api/application/nodes" | jq '.data[0].attributes.id')
-        curl -X POST "$PANEL_URL/api/application/nodes/$NODE_ID/allocations" \
-          -H "Authorization: Bearer $API_KEY" \
-          -H "Content-Type: application/json" \
-          -d '{"allocation":{"ip":"'"$TSIP"'","port":3000}}'
-
-    - name: Create NodeJS Server
-      run: |
-        curl -X POST "$PANEL_URL/api/application/servers" \
-          -H "Authorization: Bearer $API_KEY" \
-          -H "Content-Type: application/json" \
-          -d '{
-            "name":"panel",
-            "user":1,
-            "egg":2,
-            "docker_image":"ghcr.io/pterodactyl/yolks:node-16",
-            "environment":{},
-            "startup":"node server.js",
-            "limits":{"memory":4096,"swap":0,"disk":20000,"io":500,"cpu":200},
-            "feature_limits":{}
-          }'
-
-    - name: Display Panel Info
-      run: |
-        echo "PANEL: https://panelasip.my.id"
-        echo "LOGIN EMAIL : ashifaja123@gmail.com"
-        echo "LOGIN PASS  : passwordku123"
+        echo "Panel: http://localhost"
+        echo "NodeJS Server: http://localhost:3000"
         echo "TAILSCALE IP: $TSIP"
-        echo "AUTO SERVER: panel (NodeJS Bot WA)"
 
-    - name: Keep runner alive for 6 hours
+    - name: Keep runner alive
       run: sleep 6h
