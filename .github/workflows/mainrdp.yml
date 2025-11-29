@@ -44,12 +44,12 @@ jobs:
 
     - name: Install Composer dependencies
       run: |
-        docker exec ptero_panel bash -c "cd /var/www/pterodactyl && composer install --no-dev -o"
+        docker exec ptero_panel sh -c "cd /var/www/pterodactyl && composer install --no-dev -o"
 
     - name: Wait for artisan
       id: wait_panel
       run: |
-        for i in $(seq 1 200); do  # loop lebih panjang, 200*5s = ~16 menit
+        for i in $(seq 1 200); do
           if docker exec ptero_panel test -f /var/www/pterodactyl/artisan >/dev/null 2>&1; then
             echo "dir=/var/www/pterodactyl" >> $GITHUB_OUTPUT
             exit 0
@@ -63,38 +63,38 @@ jobs:
     - name: Configure .env
       run: |
         DIR=${{ steps.wait_panel.outputs.dir }}
-        docker exec ptero_panel cp ${DIR}/.env.example ${DIR}/.env
-        docker exec ptero_panel sed -i \
-          -e "s/APP_URL=.*/APP_URL=https:\/\/panelasip.my.id/" \
-          -e "s/APP_TIMEZONE=.*/APP_TIMEZONE=Asia\/Jakarta/" \
-          -e "s/DB_HOST=.*/DB_HOST=pterodb/" \
-          ${DIR}/.env
+        docker exec ptero_panel sh -c "cp ${DIR}/.env.example ${DIR}/.env"
+        docker exec ptero_panel sh -c "sed -i \
+          -e 's/APP_URL=.*/APP_URL=https:\/\/panelasip.my.id/' \
+          -e 's/APP_TIMEZONE=.*/APP_TIMEZONE=Asia\/Jakarta/' \
+          -e 's/DB_HOST=.*/DB_HOST=pterodb/' \
+          ${DIR}/.env"
 
     - name: Generate APP_KEY & migrate
       run: |
         DIR=${{ steps.wait_panel.outputs.dir }}
-        docker exec ptero_panel php ${DIR}/artisan key:generate --force
-        docker exec ptero_panel php ${DIR}/artisan migrate --force
+        docker exec ptero_panel sh -c "php ${DIR}/artisan key:generate --force"
+        docker exec ptero_panel sh -c "php ${DIR}/artisan migrate --force"
 
     - name: Create admin user
       run: |
         DIR=${{ steps.wait_panel.outputs.dir }}
-        docker exec ptero_panel php ${DIR}/artisan p:user:create \
-          --email="ashifaja123@gmail.com" \
-          --username="admin" \
-          --name-first="Admin" \
-          --name-last="Panel" \
-          --password="passwordku123" \
+        docker exec ptero_panel sh -c "php ${DIR}/artisan p:user:create \
+          --email='ashifaja123@gmail.com' \
+          --username='admin' \
+          --name-first='Admin' \
+          --name-last='Panel' \
+          --password='passwordku123' \
           --admin=1 \
-          --no-interaction || true
+          --no-interaction || true"
 
     - name: Auto SSL
       run: |
-        docker exec ptero_panel bash -c "cd /var/www/pterodactyl && php artisan p:environment:setup"
-        docker exec ptero_panel bash -c "cd /var/www/pterodactyl && php artisan p:environment:mail"
-        docker exec ptero_panel bash -c "cd /var/www/pterodactyl && php artisan p:environment:database"
-        docker exec ptero_panel bash -c "cd /var/www/pterodactyl && php artisan p:environment:queue"
-        docker exec ptero_panel bash -c "cd /var/www/pterodactyl && php artisan p:environment:ssl --email ashifaja123@gmail.com --domain panelasip.my.id"
+        docker exec ptero_panel sh -c "cd /var/www/pterodactyl && php artisan p:environment:setup"
+        docker exec ptero_panel sh -c "cd /var/www/pterodactyl && php artisan p:environment:mail"
+        docker exec ptero_panel sh -c "cd /var/www/pterodactyl && php artisan p:environment:database"
+        docker exec ptero_panel sh -c "cd /var/www/pterodactyl && php artisan p:environment:queue"
+        docker exec ptero_panel sh -c "cd /var/www/pterodactyl && php artisan p:environment:ssl --email ashifaja123@gmail.com --domain panelasip.my.id"
 
     - name: Deploy Wings (Tailscale private IP)
       run: |
@@ -109,12 +109,10 @@ jobs:
       run: |
         PANEL_URL="https://panelasip.my.id"
         API_KEY="${{ secrets.PTERO_API_KEY }}"
-        # Import NodeJS Egg (16/18)
         curl -X POST "$PANEL_URL/api/application/nests/1/eggs" \
           -H "Authorization: Bearer $API_KEY" \
           -H "Content-Type: application/json" \
           -d '{"egg":{"name":"NodeJS Bot","docker_images":["ghcr.io/pterodactyl/yolks:node-16"],"startup":"node server.js"}}'
-        # Create Node (gunakan Tailscale IP)
         NODE_IP=$TSIP
         curl -X POST "$PANEL_URL/api/application/nodes" \
           -H "Authorization: Bearer $API_KEY" \
