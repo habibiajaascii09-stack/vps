@@ -1,10 +1,10 @@
-name: Pterodactyl Panel Full Setup
+name: Ubuntu Desktop + RDP + Tailscale + Pterodactyl Panel + NodeJS(OpenWA)
 
 on:
   workflow_dispatch:
     inputs:
       confirm:
-        description: "Run full Pterodactyl setup?"
+        description: "Run full Pterodactyl + OpenWA setup?"
         required: true
         default: "yes"
 
@@ -14,147 +14,166 @@ jobs:
     timeout-minutes: 360
 
     steps:
-    # ======================================================
-    # 1. Update System
-    # ======================================================
     - name: Update system
-      run: sudo apt update -y
+      run: sudo apt update -y && sudo apt upgrade -y
 
-    # ======================================================
-    # 2. Install SSH for JuiceSSH Login
-    # ======================================================
-    - name: Install SSH Server
+    - name: Install XFCE desktop
       run: |
-        sudo apt install -y openssh-server
-        sudo systemctl enable ssh --now
-        echo "root:123456" | sudo chpasswd
-        echo "============================="
-        echo "SSH Login Ready"
-        echo "User: root"
-        echo "Pass: 123456"
-        echo "IP: $(curl -s ifconfig.me)"
-        echo "============================="
+        sudo DEBIAN_FRONTEND=noninteractive apt install -y xfce4 xfce4-goodies dbus-x11
 
-    # ======================================================
-    # 3. Install Docker
-    # ======================================================
+    - name: Install xRDP
+      run: |
+        sudo apt install -y xrdp
+        sudo systemctl enable --now xrdp
+
+    - name: Create RDP user
+      run: |
+        sudo useradd -m -s /bin/bash ubuntu || true
+        echo "ubuntu:admin123" | sudo chpasswd
+        sudo usermod -aG sudo ubuntu || true
+
     - name: Install Docker
       run: |
         curl -fsSL https://get.docker.com | sh
-        sudo systemctl start docker
+        sudo systemctl enable --now docker
+        sudo usermod -aG docker ubuntu || true
 
-    # ======================================================
-    # 4. Install Tailscale
-    # ======================================================
-    - name: Install Tailscale
+    - name: Install Tailscale and start
+      env:
+        TSKEY: ${{ secrets.TSKEY }}
       run: |
         curl -fsSL https://tailscale.com/install.sh | sh
-        sudo tailscale up --ssh --authkey=${{ secrets.TSKEY }} --accept-dns=false
-        echo "Tailscale IP:"
-        tailscale ip
+        sudo tailscale up --authkey="$TSKEY" --accept-routes --ssh --accept-dns=false || true
+        echo "TAILSCALE_IP=$(tailscale ip -4 | head -n1)" > /tmp/tailscale_ip.txt
 
-    # ======================================================
-    # 5. Start MySQL (MariaDB)
-    # ======================================================
-    - name: Start MariaDB
+    - name: Show basic host specs
       run: |
-        docker rm -f mysql || true
-        docker run -d \
-          --name mysql \
-          -e MYSQL_DATABASE=ptero \
-          -e MYSQL_USER=ptero \
-          -e MYSQL_PASSWORD=ptero123 \
-          -e MYSQL_ROOT_PASSWORD=root123 \
-          -p 3306:3306 \
+        echo "===== HOST SPECS ====="
+        echo "OS: $(lsb_release -ds || cat /etc/os-release)"
+        echo "Uptime: $(uptime -p)"
+        echo "CPU(s): $(nproc) cores"
+        free -m
+        df -h --output=source,size,used,avail,pcent,target | sed -n '1,5p'
+        echo "======================"
+
+    - name: Start MariaDB (container)
+      run: |
+        docker rm -f ptero_mysql || true
+        docker run -d --name ptero_mysql \
+          -e MARIADB_ROOT_PASSWORD=root123 \
+          -e MARIADB_DATABASE=ptero \
+          -e MARIADB_USER=ptero \
+          -e MARIADB_PASSWORD=ptero123 \
           mariadb:10.6
 
-    # ======================================================
-    # 6. Start Pterodactyl Panel
-    # ======================================================
-    - name: Start Panel Container
+    - name: Start Pterodactyl Panel (container)
       run: |
-        docker rm -f panel || true
-        docker run -d \
-          --name panel \
-          --link mysql:db \
+        docker rm -f ptero_panel || true
+        docker run -d --name ptero_panel \
+          --link ptero_mysql:mysql \
           -p 8080:80 \
           ghcr.io/pterodactyl/panel:latest
 
-    # ======================================================
-    # 7. Wait for Panel
-    # ======================================================
-    - name: Wait panel filesystem
-      id: ready
+    - name: Wait for panel filesystem (look for artisan)
+      id: wait_panel
       run: |
-        echo "Waiting for panel filesystem..."
-        for i in {1..60}; do
-          if docker exec panel test -f /var/www/pterodactyl/artisan 2>/dev/null; then
+        for i in $(seq 1 60); do
+          if docker exec ptero_panel test -f /var/www/pterodactyl/artisan >/dev/null 2>&1; then
             echo "dir=/var/www/pterodactyl" >> $GITHUB_OUTPUT
             exit 0
           fi
-          if docker exec panel test -f /var/www/html/artisan 2>/dev/null; then
+          if docker exec ptero_panel test -f /var/www/html/artisan >/dev/null 2>&1; then
             echo "dir=/var/www/html" >> $GITHUB_OUTPUT
             exit 0
           fi
-          echo "Wait... ($i)"
+          echo "Waiting for panel... ($i)"
           sleep 3
         done
-        echo "Filesystem never appeared"
+        echo "Panel filesystem never appeared" >&2
         exit 1
 
-    # ======================================================
-    # 8. Create .env
-    # ======================================================
-    - name: Generate .env
+    - name: Ensure .env (safe) and configure DB
       run: |
-        DIR=${{ steps.ready.outputs.dir }}
-        docker exec panel sh -c "cp $DIR/.env.example $DIR/.env || true"
+        DIR=${{ steps.wait_panel.outputs.dir }}
+        # if .env.example exists copy, otherwise create minimal .env
+        if docker exec ptero_panel test -f $DIR/.env.example >/dev/null 2>&1; then
+          docker exec ptero_panel cp $DIR/.env.example $DIR/.env || true
+        else
+          docker exec ptero_panel sh -c "cat > $DIR/.env <<'EOF'
+APP_ENV=production
+APP_DEBUG=false
+APP_URL=http://127.0.0.1:8080
+DB_CONNECTION=mysql
+DB_HOST=mysql
+DB_PORT=3306
+DB_DATABASE=ptero
+DB_USERNAME=ptero
+DB_PASSWORD=ptero123
+EOF"
+        fi
+        # ensure DB host is correct (link name)
+        docker exec ptero_panel sh -c "sed -i 's|DB_HOST=.*|DB_HOST=mysql|' $DIR/.env || true"
 
-        docker exec panel sh -c "sed -i 's|APP_URL=.*|APP_URL=http://127.0.0.1:8080|' $DIR/.env"
-        docker exec panel sh -c "sed -i 's|DB_HOST=.*|DB_HOST=mysql|' $DIR/.env"
-        docker exec panel sh -c "sed -i 's|DB_DATABASE=.*|DB_DATABASE=ptero|' $DIR/.env"
-        docker exec panel sh -c "sed -i 's|DB_USERNAME=.*|DB_USERNAME=ptero|' $DIR/.env"
-        docker exec panel sh -c "sed -i 's|DB_PASSWORD=.*|DB_PASSWORD=ptero123|' $DIR/.env"
-
-    # ======================================================
-    # 9. Run artisan setup
-    # ======================================================
-    - name: Initialize Pterodactyl
+    - name: Run artisan setup (key+migrate) + create admin
       run: |
-        DIR=${{ steps.ready.outputs.dir }}
-
-        docker exec panel sh -c "cd $DIR && php artisan key:generate --force"
-        docker exec panel sh -c "cd $DIR && php artisan migrate --force"
-
+        DIR=${{ steps.wait_panel.outputs.dir }}
+        docker exec ptero_panel sh -c "cd $DIR && php artisan key:generate --force || true"
+        # Wait DB a bit
+        sleep 6
+        docker exec ptero_panel sh -c "cd $DIR && php artisan migrate --force || true"
         ADMIN_PASS=$(openssl rand -hex 6)
+        docker exec ptero_panel sh -c "cd $DIR && php artisan p:user:make --email='ashifaja123@gmail.com' --username='admin' --name-first='Admin' --name-last='User' --password='${ADMIN_PASS}' --admin=1 || true"
+        echo "ADMIN_PASS=${ADMIN_PASS}" > /tmp/panel_admin.txt
 
-        docker exec panel sh -c "cd $DIR && php artisan p:user:make \
-          --email=admin@local.com \
-          --username=admin \
-          --name-first=Admin \
-          --name-last=User \
-          --password=${ADMIN_PASS} \
-          --admin=1"
-
-        echo "Admin Password: ${ADMIN_PASS}"
-
-    # ======================================================
-    # 10. Show Access Info
-    # ======================================================
-    - name: Show Info
+    - name: Import NodeJS Egg (OpenWA template)
       run: |
-        echo "===================================="
-        echo "PTERODACTYL PANEL READY"
-        echo "Panel URL: http://$(curl -s ifconfig.me):8080"
-        echo "Admin user: admin"
-        echo "Admin pass printed above"
-        echo "SSH: root / 123456"
-        echo "===================================="
+        # download community nodejs egg (parkervcp generic nodejs)
+        wget -q -O /tmp/egg-nodejs.json https://raw.githubusercontent.com/parkervcp/eggs/master/generic/nodejs/egg-nodejs.json || true
+        # copy into container and import via artisan (if command exists)
+        docker cp /tmp/egg-nodejs.json ptero_panel:/tmp/egg-nodejs.json || true
+        docker exec ptero_panel sh -c "php artisan p:egg:import /tmp/egg-nodejs.json || true"
 
-    # ======================================================
-    # 11. Keep alive 6 hours
-    # ======================================================
-    - name: Keep Alive
+    - name: Install Wings (daemon) as Docker container (example)
       run: |
-        echo "Runner online for 6 hours..."
+        # create a minimal wings config (will need to register with panel via token)
+        mkdir -p /tmp/wings
+        cat > /tmp/wings/config.yml <<'EOF'
+# Minimal wings config (you will need to update this to match your panel URL & token)
+bind_interface: 0.0.0.0
+remote: http://127.0.0.1:8080
+token: REPLACE_WITH_PANEL_DAEMON_TOKEN
+EOF
+        # run wings container (note: you must update config token later)
+        docker rm -f ptero_wings || true
+        docker run -d --name ptero_wings --restart unless-stopped \
+          -v /tmp/wings:/etc/pterodactyl \
+          -p 8081:8081 \
+          pterodactyl/wings:latest || true
+
+    - name: Print connection info + specs
+      run: |
+        TS=$(tailscale ip -4 | head -n1 || true)
+        echo "======================================"
+        echo "RDP (xRDP) login: ubuntu / admin123  (port 3389)"
+        echo "Tailscale IP: $TS"
+        echo ""
+        echo "Panel (via Tailscale): http://$TS:8080"
+        echo "Panel Admin email: ashifaja123@gmail.com"
+        cat /tmp/panel_admin.txt || true
+        echo ""
+        echo "If the panel URL doesn't respond in your mobile browser, open Chrome inside the RDP session and visit http://localhost:8080"
+        echo "Wings container started (may need config token)."
+        echo "======================================"
+        echo ""
+        echo "===== HOST SPECS (MiB) ====="
+        awk '/MemTotal/ {print $2/1024 " MiB RAM"}' /proc/meminfo || true
+        free -m
+        df -m | sed -n '1,5p'
+        echo "CPU cores: $(nproc)"
+        uname -a
+        echo "============================="
+
+    - name: Keep runner alive (6h)
+      run: |
+        echo "Runner will stay alive for 6 hours to allow you to RDP in and finalize setup."
         sleep 6h
