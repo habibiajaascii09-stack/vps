@@ -29,7 +29,7 @@ jobs:
     - name: Create nginx.conf automatically
       run: |
         mkdir -p $PWD
-        cat > $PWD/nginx.conf <<'EOF'
+        cat > $PWD/nginx.conf <<EOF
 server {
     listen 80;
     server_name localhost;
@@ -38,14 +38,14 @@ server {
     index index.php index.html;
 
     location / {
-        try_files $uri /index.php?$query_string;
+        try_files \$uri /index.php?\$query_string;
     }
 
-    location ~ \.php$ {
+    location ~ \.php\$ {
         fastcgi_pass ptero_panel:9000;
         fastcgi_index index.php;
         include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
     }
 
     location ~ /\.ht {
@@ -56,15 +56,14 @@ EOF
 
     - name: Deploy Pterodactyl Panel (PHP-FPM + Nginx)
       run: |
-        # Hapus container lama
         docker rm -f ptero_panel ptero_nginx || true
 
-        # PHP-FPM container untuk panel
+        # PHP-FPM container
         docker run -d --name ptero_panel --network ptero-net \
           -v /etc/pterodactyl:/var/www/html \
           php:8.2-fpm
 
-        # Nginx container proxy ke PHP-FPM
+        # Nginx container
         docker run -d --name ptero_nginx --network ptero-net \
           -p 80:80 \
           -v /etc/pterodactyl:/var/www/html:ro \
