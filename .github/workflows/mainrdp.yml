@@ -21,7 +21,7 @@ jobs:
         sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
         sudo systemctl enable docker --now
         docker --version
-        sudo apt install -y curl jq net-tools
+        sudo apt install -y curl jq net-tools composer
 
     - name: Setup Tailscale
       env:
@@ -42,16 +42,20 @@ jobs:
           -p 8080:80 \
           ghcr.io/pterodactyl/panel:latest
 
+    - name: Install Composer dependencies
+      run: |
+        docker exec ptero_panel bash -c "cd /var/www/pterodactyl && composer install --no-dev -o"
+
     - name: Wait for artisan
       id: wait_panel
       run: |
-        for i in $(seq 1 120); do
+        for i in $(seq 1 200); do  # loop lebih panjang, 200*5s = ~16 menit
           if docker exec ptero_panel test -f /var/www/pterodactyl/artisan >/dev/null 2>&1; then
             echo "dir=/var/www/pterodactyl" >> $GITHUB_OUTPUT
             exit 0
           fi
           echo "Waiting ($i)"
-          sleep 3
+          sleep 5
         done
         echo "Artisan not found"
         exit 1
