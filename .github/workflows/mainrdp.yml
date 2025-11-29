@@ -1,4 +1,4 @@
-name: Ptero-Panel + Wings (Tailscale)
+name: Ptero-Panel + Wings + Auto NodeJS Server (Tailscale)
 
 on:
   workflow_dispatch:
@@ -8,10 +8,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Update & install dependencies
+    - name: Install Docker (official)
       run: |
         sudo apt update -y
-        sudo apt install -y docker.io curl jq net-tools
+        sudo apt install -y ca-certificates curl gnupg lsb-release
+        sudo mkdir -p /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        echo \
+          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+          $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+        sudo apt update -y
+        sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+        sudo systemctl enable docker --now
+        docker --version
+        sudo apt install -y curl jq net-tools
 
     - name: Setup Tailscale
       env:
@@ -80,7 +90,6 @@ jobs:
         docker exec ptero_panel bash -c "cd /var/www/pterodactyl && php artisan p:environment:mail"
         docker exec ptero_panel bash -c "cd /var/www/pterodactyl && php artisan p:environment:database"
         docker exec ptero_panel bash -c "cd /var/www/pterodactyl && php artisan p:environment:queue"
-        docker exec ptero_panel bash -c "cd /var/www/pterodactyl && php artisan p:environment:mail"
         docker exec ptero_panel bash -c "cd /var/www/pterodactyl && php artisan p:environment:ssl --email ashifaja123@gmail.com --domain panelasip.my.id"
 
     - name: Deploy Wings (Tailscale private IP)
@@ -92,9 +101,50 @@ jobs:
           ghcr.io/pterodactyl/wings:latest \
           --config /etc/pterodactyl/config.yml
 
+    - name: Import NodeJS Egg & Create Node
+      run: |
+        PANEL_URL="https://panelasip.my.id"
+        API_KEY="${{ secrets.PTERO_API_KEY }}"
+        # Import NodeJS Egg (16/18)
+        curl -X POST "$PANEL_URL/api/application/nests/1/eggs" \
+          -H "Authorization: Bearer $API_KEY" \
+          -H "Content-Type: application/json" \
+          -d '{"egg":{"name":"NodeJS Bot","docker_images":["ghcr.io/pterodactyl/yolks:node-16"],"startup":"node server.js"}}'
+        # Create Node (gunakan Tailscale IP)
+        NODE_IP=$TSIP
+        curl -X POST "$PANEL_URL/api/application/nodes" \
+          -H "Authorization: Bearer $API_KEY" \
+          -H "Content-Type: application/json" \
+          -d "{\"name\":\"NodeJS-Node\",\"fqdn\":\"$NODE_IP\",\"scheme\":\"http\",\"memory_overallocate\":0,\"disk_overallocate\":0,\"daemonBase\":\"/etc/pterodactyl\"}"
+
+    - name: Create Allocation
+      run: |
+        NODE_ID=$(curl -s -H "Authorization: Bearer $API_KEY" "$PANEL_URL/api/application/nodes" | jq '.data[0].attributes.id')
+        curl -X POST "$PANEL_URL/api/application/nodes/$NODE_ID/allocations" \
+          -H "Authorization: Bearer $API_KEY" \
+          -H "Content-Type: application/json" \
+          -d '{"allocation":{"ip":"'"$TSIP"'","port":3000}}'
+
+    - name: Create NodeJS Server
+      run: |
+        curl -X POST "$PANEL_URL/api/application/servers" \
+          -H "Authorization: Bearer $API_KEY" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "name":"panel",
+            "user":1,
+            "egg":2,
+            "docker_image":"ghcr.io/pterodactyl/yolks:node-16",
+            "environment":{},
+            "startup":"node server.js",
+            "limits":{"memory":4096,"swap":0,"disk":20000,"io":500,"cpu":200},
+            "feature_limits":{}
+          }'
+
     - name: Display Panel Info
       run: |
         echo "PANEL: https://panelasip.my.id"
         echo "LOGIN EMAIL : ashifaja123@gmail.com"
         echo "LOGIN PASS  : passwordku123"
         echo "TAILSCALE IP: $TSIP"
+        echo "AUTO SERVER: panel (NodeJS Bot WA)"
