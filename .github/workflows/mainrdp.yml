@@ -1,108 +1,157 @@
-name: Ptero Docker + Redis + Tailscale SSH
+name: Ptero Docker + Tailscale Lite
 
 on:
   workflow_dispatch:
 
 jobs:
-  setup:
+  ptero_setup:
+    name: Pterodactyl Setup Runner
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
-    # ---------------------------
-    # 1. Install Docker
-    # ---------------------------
-    - name: Install Docker
-      run: |
-        sudo apt update -y
-        curl -fsSL https://get.docker.com | sh
-        sudo systemctl start docker || true
+      # =========================================================
+      # 1. Install Docker & SSH Server
+      # =========================================================
+      - name: Install Docker & SSH Server
+        run: |
+          echo "Menginstal Docker dan SSH Server..."
+          sudo apt update -y
+          # Install SSH Server
+          sudo apt install -y openssh-server curl wget git
+          # Install Docker
+          curl -fsSL https://get.docker.com | sh
+          sudo systemctl start docker || true
 
-    # ---------------------------
-    # 2. Install Tailscale + Enable SSH
-    # ---------------------------
-    - name: Install Tailscale + SSH
-      env:
-        AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
-      run: |
-        curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.gpg \
-          | sudo gpg --dearmor -o /usr/share/keyrings/tailscale.gpg
-        echo "deb [signed-by=/usr/share/keyrings/tailscale.gpg] https://pkgs.tailscale.com/stable/ubuntu jammy main" \
-          | sudo tee /etc/apt/sources.list.d/tailscale.list
-        sudo apt update -y
-        sudo apt install -y tailscale
-        sudo systemctl enable --now tailscaled
-        sudo tailscale up --ssh --authkey="${AUTHKEY}" --hostname="ghrunner-${{ github.run_id }}" --accept-routes
+      # =========================================================
+      # 2. Install & Start Tailscale & SSH Setup
+      # =========================================================
+      - name: Install & Start Tailscale & SSH Setup
+        id: step2 
+        env:
+          TAILSCALE_KEY: ${{ secrets.TAILSCALE_KEY }}
+          RUNNER_USER: runner
+          RUNNER_PASS: temp${{ github.run_id }} 
+        run: |
+          echo "--- 🔑 Menginstal dan Otentikasi Tailscale ---"
+          # Menggunakan skrip instalasi resmi Tailscale yang lebih andal (FIX INSTALASI)
+          curl -fsSL https://pkgs.tailscale.com/install.sh | sudo bash
 
-    # ---------------------------
-    # 3. Start MariaDB
-    # ---------------------------
-    - name: Start MariaDB
-      run: |
-        docker rm -f db || true
-        docker run -d --name db \
-          --health-cmd="mysqladmin ping -h localhost -p'ptero123'" \
-          --health-interval=5s --health-timeout=3s --health-retries=20 \
-          -e MARIADB_ROOT_PASSWORD=rootpass \
-          -e MARIADB_DATABASE=ptero \
-          -e MARIADB_USER=ptero \
-          -e MARIADB_PASSWORD=ptero123 \
-          mariadb:10.6
+          echo "Menjalankan Tailscale dengan auth key..."
+          sudo tailscale up --authkey="${TAILSCALE_KEY}" --hostname=gh-runner-${{ github.run_id }} --accept-routes
 
-    # ---------------------------
-    # 4. Start Redis
-    # ---------------------------
-    - name: Start Redis
-      run: |
-        docker rm -f redis || true
-        docker run -d --name redis \
-          -p 6379:6379 \
-          redis:7-alpine
+          sleep 5
+          TS_IP=$(tailscale ip -4 2>/dev/null || true)
 
-    # ---------------------------
-    # 5. Start Pterodactyl Panel
-    # ---------------------------
-    - name: Start Panel
-      run: |
-        docker rm -f panel || true
-        docker run -d --name panel \
-          --link db:db \
-          --link redis:redis \
-          -p 8080:80 \
-          -e DB_CONNECTION=mysql \
-          -e DB_HOST=db \
-          -e DB_PORT=3306 \
-          -e DB_DATABASE=ptero \
-          -e DB_USERNAME=ptero \
-          -e DB_PASSWORD=ptero123 \
-          -e REDIS_HOST=redis \
-          -e CACHE_DRIVER=redis \
-          -e QUEUE_CONNECTION=redis \
-          ghcr.io/pterodactyl/panel:latest
+          if [ -n "$TS_IP" ]; then
+            echo "✅ Tailscale IP berhasil didapatkan: $TS_IP"
+          else
+            echo "❌ Gagal mendapatkan IP Tailscale"
+          fi
+          
+          # Setup User SSH Sementara
+          echo "Menyiapkan akun SSH/VPS sementara..."
+          sudo useradd -m -s /bin/bash $RUNNER_USER
+          echo "$RUNNER_USER:$RUNNER_PASS" | sudo chpasswd
+          
+          # Mengizinkan Login Password (Wajib untuk JuiceSSH/Termux)
+          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo systemctl restart sshd
 
-        sleep 20
+          echo "::set-output name=ssh_pass::${RUNNER_PASS}"
 
-        ADMIN_PASS=$(openssl rand -hex 6)
-        docker exec panel sh -c "cd /app && cp .env.example .env && \
-          php artisan key:generate --force && \
-          php artisan migrate --force"
-        docker exec panel sh -c "cd /app && php artisan p:user:make \
-          --username=admin \
-          --email=test@example.com \
-          --name-first=Admin \
-          --name-last=User \
-          --password=${ADMIN_PASS} \
-          --admin=1"
+      # =========================================================
+      # 3. Start MariaDB Container
+      # =========================================================
+      - name: Start MariaDB
+        run: |
+          echo "Menjalankan MariaDB Container..."
+          docker rm -f db || true
+          docker run -d --name db \
+            -e MARIADB_ROOT_PASSWORD=rootpass \
+            -e MARIADB_DATABASE=ptero \
+            -e MARIADB_USER=ptero \
+            -e MARIADB_PASSWORD=ptero123 \
+            mariadb:10.6
 
-        TS_IP=$(tailscale ip -4)
-        echo "=============================="
-        echo "Tailscale SSH: ssh runner@${TS_IP}"
-        echo "Pterodactyl: http://${TS_IP}:8080"
-        echo "Admin pass: ${ADMIN_PASS}"
-        echo "=============================="
+      # =========================================================
+      # 4. Start Pterodactyl Panel + Init DB + Create Admin & Output Info
+      # =========================================================
+      - name: Start Panel + init DB + create admin
+        id: panel_setup
+        run: |
+          ADMIN_PASS=$(openssl rand -hex 6)
+          docker rm -f panel || true
+          echo "Menjalankan Pterodactyl Panel Container..."
+          docker run -d --name panel \
+            --link db:db \
+            -p 8080:80 \
+            -e DB_CONNECTION=mysql \
+            -e DB_HOST=db \
+            -e DB_PORT=3306 \
+            -e DB_DATABASE=ptero \
+            -e DB_USERNAME=ptero \
+            -e DB_PASSWORD=ptero123 \
+            ghcr.io/pterodactyl/panel:latest || true
 
-    # ---------------------------
-    # 6. Keep runner alive 6h
-    # ---------------------------
-    - name: Keep alive
-      run: sleep 6h
+          # wait filesystem & artisan availability
+          for i in $(seq 1 60); do
+            if docker exec panel sh -c "test -f /var/www/pterodactyl/artisan" >/dev/null 2>&1 || docker exec panel sh -c "test -f /var/www/html/artisan" >/dev/null 2>&1; then
+              echo "Panel filesystem ready."
+              break
+            fi
+            echo "Waiting for panel container..."
+            sleep 2
+          done
+
+          # find artisan path and app dir
+          if docker exec panel sh -c "test -f /var/www/pterodactyl/artisan" >/dev/null 2>&1; then
+            APP_DIR="/var/www/pterodactyl"
+          else
+            APP_DIR="/var/www/html"
+          fi
+
+          # ensure .env and key, migrate, create admin
+          docker exec panel sh -c "cd ${APP_DIR} && cp .env.example .env 2>/dev/null || true"
+          docker exec panel sh -c "cd ${APP_DIR} && sed -i 's|APP_URL=.*|APP_URL=http://127.0.0.1:8080|' .env || true"
+          docker exec panel sh -c "cd ${APP_DIR} && php artisan key:generate --force || true"
+          docker exec panel sh -c "cd ${APP_DIR} && php artisan migrate --force || true"
+          docker exec panel sh -c "cd ${APP_DIR} && php artisan p:user:make --email='ashifaja123@gmail.com' --username='admin' --name-first='Admin' --name-last='User' --password='${ADMIN_PASS}' --admin=1 || true"
+
+          # capture Tailscale IP & public IP
+          TS_IP=$(tailscale ip -4 2>/dev/null || true)
+          PUBLIC_IP=$(curl -s https://api.ipify.org || echo "127.0.0.1")
+          
+          # Ambil password SSH dari Langkah 2
+          SSH_PASS="${{ steps.step2.outputs.ssh_pass }}"
+
+          echo "============================================================"
+          echo "               ✅ Pterodactyl Panel (Docker) READY          "
+          echo "============================================================"
+          
+          # --- Akses Panel ---
+          echo "Panel URL (Tailscale): http://${TS_IP}:8080"
+          echo "Panel URL (Publik):    http://${PUBLIC_IP}:8080"
+          echo ""
+          echo "Admin User  : admin"
+          echo "Admin Pass  : ${ADMIN_PASS}"
+          echo "DB User     : ptero  DB Pass: ptero123"
+          echo "------------------------------------------------------------"
+
+          # --- Akses VPS/SSH (JuiceSSH/Termux) ---
+          echo "Akses VPS/Runner via Tailscale (JuiceSSH/Termux)"
+          echo "IP VPS (Tailscale): ${TS_IP}"
+          echo "Username VPS: runner"
+          echo "Password VPS: ${SSH_PASS}"
+          echo "------------------------------------------------------------"
+          echo "To shell into panel container: docker exec -it panel sh"
+          echo "============================================================"
+
+      # =========================================================
+      # 5. Keep Runner Alive 6h
+      # =========================================================
+      - name: Keep Alive 6h
+        run: |
+          echo "Runner sleeping for 6 hours..."
+          sleep 6h
