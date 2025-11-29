@@ -1,73 +1,53 @@
-name: Ptero Docker + Tailscale Lite
+name: Ptero Docker + Tailscale + SSH Lite
 
 on:
   workflow_dispatch:
 
 jobs:
   ptero_setup:
-    name: Pterodactyl Setup Runner
+    name: Pterodactyl Runner
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
       # =========================================================
-      # 1. Install Docker & SSH Server
+      # 0. Install Docker
       # =========================================================
-      - name: Install Docker & SSH Server
+      - name: Install Docker
         run: |
-          echo "Menginstal Docker dan SSH Server..."
+          echo "Menginstal Docker..."
           sudo apt update -y
-          # Install SSH Server
-          sudo apt install -y openssh-server curl wget git
-          # Install Docker (menggunakan skrip resmi, ini lebih baik daripada apt)
           curl -fsSL https://get.docker.com | sh
           sudo systemctl start docker || true
 
       # =========================================================
-      # 2. Install & Start Tailscale & SSH Setup (Perbaikan Instalasi)
+      # 1. Add Tailscale Repo
       # =========================================================
-      - name: Install & Start Tailscale & SSH Setup
-        id: step2 
+      - name: Add Tailscale repo
+        run: |
+          sudo mkdir -p /etc/apt/keyrings
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.gpg | sudo gpg --dearmor -o /etc/apt/keyrings/tailscale-archive-keyring.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/tailscale-archive-keyring.gpg arch=amd64] https://pkgs.tailscale.com/stable/ubuntu jammy main" | sudo tee /etc/apt/sources.list.d/tailscale.list >/dev/null
+          sudo apt update -y
+
+      # =========================================================
+      # 2. Install + Start Tailscale
+      # =========================================================
+      - name: Start Tailscale
         env:
           TAILSCALE_KEY: ${{ secrets.TAILSCALE_KEY }}
-          RUNNER_USER: runner
-          RUNNER_PASS: temp${{ github.run_id }} 
         run: |
-          echo "--- 🔑 Menginstal dan Otentikasi Tailscale (FIXED) ---"
-          
-          # FIX: Menggunakan skrip instalasi Tailscale resmi (Mengatasi 404/command not found)
-          curl -fsSL https://pkgs.tailscale.com/install.sh | sudo bash 
-          
-          echo "Menjalankan Tailscale dengan auth key..."
-          sudo tailscale up --authkey="${TAILSCALE_KEY}" --hostname=gh-runner-${{ github.run_id }} --accept-routes
-
-          sleep 5
-          TS_IP=$(tailscale ip -4 2>/dev/null || true)
-
-          if [ -n "$TS_IP" ]; then
-            echo "✅ Tailscale IP berhasil didapatkan: $TS_IP"
-          else
-            echo "❌ Gagal mendapatkan IP Tailscale"
-          fi
-          
-          # Setup User SSH Sementara
-          echo "Menyiapkan akun SSH/VPS sementara..."
-          sudo useradd -m -s /bin/bash $RUNNER_USER
-          echo "$RUNNER_USER:$RUNNER_PASS" | sudo chpasswd
-          
-          # Mengizinkan Login Password (Wajib untuk JuiceSSH/Termux)
-          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo systemctl restart sshd
-
-          echo "::set-output name=ssh_pass::${RUNNER_PASS}"
+          sudo apt install -y tailscale
+          sudo tailscale up --authkey="${TAILSCALE_KEY}" --hostname=gh-${{ github.run_id }} --accept-routes
+          sleep 3
+          TS_IP=$(tailscale ip -4 || true)
+          echo "Tailscale IP: $TS_IP"
 
       # =========================================================
-      # 3. Start MariaDB Container (Kode Anda)
+      # 3. Start MariaDB
       # =========================================================
       - name: Start MariaDB
         run: |
-          echo "Menjalankan MariaDB Container..."
           docker rm -f db || true
           docker run -d --name db \
             -e MARIADB_ROOT_PASSWORD=rootpass \
@@ -77,14 +57,13 @@ jobs:
             mariadb:10.6
 
       # =========================================================
-      # 4. Start Pterodactyl Panel + Init DB + Create Admin & Output Info
+      # 4. Start Pterodactyl Panel
       # =========================================================
-      - name: Start Panel + init DB + create admin
-        id: panel_setup
+      - name: Start Panel
         run: |
-          ADMIN_PASS=$(openssl rand -hex 6)
+          ADMIN_PASS=$(openssl rand -hex 4)
           docker rm -f panel || true
-          echo "Menjalankan Pterodactyl Panel Container..."
+
           docker run -d --name panel \
             --link db:db \
             -p 8080:80 \
@@ -94,65 +73,77 @@ jobs:
             -e DB_DATABASE=ptero \
             -e DB_USERNAME=ptero \
             -e DB_PASSWORD=ptero123 \
-            ghcr.io/pterodactyl/panel:latest || true
+            -e CACHE_DRIVER=file \
+            -e SESSION_DRIVER=file \
+            -e QUEUE_DRIVER=sync \
+            ghcr.io/pterodactyl/panel:latest
 
-          # wait filesystem & artisan availability
-          for i in $(seq 1 60); do
-            if docker exec panel sh -c "test -f /var/www/pterodactyl/artisan" >/dev/null 2>&1 || docker exec panel sh -c "test -f /var/www/html/artisan" >/dev/null 2>&1; then
-              echo "Panel filesystem ready."
-              break
-            fi
-            echo "Waiting for panel container..."
-            sleep 2
-          done
+          sleep 10
 
-          # find artisan path and app dir
-          if docker exec panel sh -c "test -f /var/www/pterodactyl/artisan" >/dev/null 2>&1; then
+          # detect artisan path
+          if docker exec panel sh -c "test -f /var/www/pterodactyl/artisan"; then
             APP_DIR="/var/www/pterodactyl"
           else
             APP_DIR="/var/www/html"
           fi
 
-          # ensure .env and key, migrate, create admin
-          docker exec panel sh -c "cd ${APP_DIR} && cp .env.example .env 2>/dev/null || true"
-          docker exec panel sh -c "cd ${APP_DIR} && sed -i 's|APP_URL=.*|APP_URL=http://127.0.0.1:8080|' .env || true"
-          docker exec panel sh -c "cd ${APP_DIR} && php artisan key:generate --force || true"
-          docker exec panel sh -c "cd ${APP_DIR} && php artisan migrate --force || true"
-          docker exec panel sh -c "cd ${APP_DIR} && php artisan p:user:make --email='ashifaja123@gmail.com' --username='admin' --name-first='Admin' --name-last='User' --password='${ADMIN_PASS}' --admin=1 || true"
+          # Init panel
+          docker exec panel sh -c "cd ${APP_DIR} && cp .env.example .env"
+          docker exec panel sh -c "cd ${APP_DIR} && php artisan key:generate --force"
+          docker exec panel sh -c "cd ${APP_DIR} && php artisan migrate --force"
 
-          # capture Tailscale IP & public IP
-          TS_IP=$(tailscale ip -4 2>/dev/null || true)
-          PUBLIC_IP=$(curl -s https://api.ipify.org || echo "127.0.0.1")
-          
-          # Ambil password SSH dari Langkah 2
-          SSH_PASS="${{ steps.step2.outputs.ssh_pass }}"
+          docker exec panel sh -c "cd ${APP_DIR} && php artisan p:user:make \
+            --email='admin@example.com' \
+            --username='admin' \
+            --name-first='Admin' \
+            --name-last='User' \
+            --password='${ADMIN_PASS}' \
+            --admin=1"
 
-          echo "============================================================"
-          echo "               ✅ Pterodactyl Panel (Docker) READY          "
-          echo "============================================================"
-          
-          # --- Akses Panel ---
-          echo "Panel URL (Tailscale): http://${TS_IP}:8080"
-          echo "Panel URL (Publik):    http://${PUBLIC_IP}:8080"
+          TS_IP=$(tailscale ip -4 || true)
+          PUBLIC_IP=$(curl -s https://api.ipify.org || echo "N/A")
+
+          echo "===================================="
+          echo " Pterodactyl Panel READY"
+          echo " Access via Tailscale: http://${TS_IP}:8080"
+          echo " Access via Public IP: http://${PUBLIC_IP}:8080"
           echo ""
-          echo "Admin User  : admin"
-          echo "Admin Pass  : ${ADMIN_PASS}"
-          echo "DB User     : ptero  DB Pass: ptero123"
-          echo "------------------------------------------------------------"
-
-          # --- Akses VPS/SSH (JuiceSSH/Termux) ---
-          echo "Akses VPS/Runner via Tailscale (JuiceSSH/Termux)"
-          echo "IP VPS (Tailscale): ${TS_IP}"
-          echo "Username VPS: runner"
-          echo "Password VPS: ${SSH_PASS}"
-          echo "------------------------------------------------------------"
-          echo "To shell into panel container: docker exec -it panel sh"
-          echo "============================================================"
+          echo " Admin user : admin"
+          echo " Admin pass : ${ADMIN_PASS}"
+          echo " DB: ptero / ptero123"
+          echo "===================================="
 
       # =========================================================
-      # 5. Keep Runner Alive 6h (Kode Anda)
+      # 5. Install SSH for JuiceSSH
       # =========================================================
-      - name: Keep Alive 6h
+      - name: Enable SSH Login
         run: |
-          echo "Runner sleeping for 6 hours..."
+          sudo apt update -y
+          sudo apt install -y openssh-server
+
+          sudo systemctl enable ssh
+          sudo systemctl start ssh
+
+          SSH_USER="runner"
+          SSH_PASS=$(openssl rand -hex 4)
+
+          sudo useradd -m -s /bin/bash $SSH_USER || true
+          echo "$SSH_USER:$SSH_PASS" | sudo chpasswd
+
+          TS_IP=$(tailscale ip -4 || true)
+
+          echo "===================================="
+          echo " SSH LOGIN READY (JuiceSSH)"
+          echo " User : $SSH_USER"
+          echo " Pass : $SSH_PASS"
+          echo " Host : $TS_IP"
+          echo " Command : ssh ${SSH_USER}@${TS_IP}"
+          echo "===================================="
+
+      # =========================================================
+      # 6. Keep Alive 6h
+      # =========================================================
+      - name: Keep Alive 6 hours
+        run: |
+          echo "Runner active for 6 hours..."
           sleep 6h
