@@ -7,81 +7,80 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - name: Update
-      run: sudo apt update
+      - name: Update
+        run: sudo apt update
 
-    - name: Install SSH Server (JuiceSSH Login)
-      run: |
-        sudo apt install -y openssh-server
-        sudo systemctl enable ssh --now
-        echo "root:123456" | sudo chpasswd
-        echo "SSH ready on $(curl -s ifconfig.me)"
+      - name: Install SSH Server (JuiceSSH Login)
+        run: |
+          sudo apt install -y openssh-server
+          sudo systemctl enable ssh --now
+          echo "root:123456" | sudo chpasswd
+          echo "SSH ready on $(curl -s ifconfig.me)"
 
-    - name: Install Docker
-      run: |
-        curl -fsSL https://get.docker.com | sh
-        sudo systemctl start docker
+      - name: Install Docker
+        run: |
+          curl -fsSL https://get.docker.com | sh
+          sudo systemctl start docker
 
-    - name: Install Tailscale
-      run: |
-        curl -fsSL https://tailscale.com/install.sh | sh
-        sudo tailscale up --ssh --authkey=${{ secrets.TSKEY }} --accept-dns=false
-        echo "Tailscale IP:"
-        tailscale ip
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --ssh --authkey=${{ secrets.TSKEY }} --accept-dns=false
+          echo "Tailscale IP:"
+          tailscale ip
 
-    - name: Start MySQL container
-      run: |
-        docker run -d \
-          --name mysql \
-          -e MYSQL_DATABASE=ptero \
-          -e MYSQL_USER=ptero \
-          -e MYSQL_PASSWORD=ptero123 \
-          -e MYSQL_ROOT_PASSWORD=root123 \
-          -p 3306:3306 \
-          mariadb:10.6
+      - name: Start MySQL container
+        run: |
+          docker run -d \
+            --name mysql \
+            -e MYSQL_DATABASE=ptero \
+            -e MYSQL_USER=ptero \
+            -e MYSQL_PASSWORD=ptero123 \
+            -e MYSQL_ROOT_PASSWORD=root123 \
+            -p 3306:3306 \
+            mariadb:10.6
 
-    - name: Start Pterodactyl Panel container
-      run: |
-        docker run -d \
-          --name panel \
-          -p 8080:80 \
-          ghcr.io/pterodactyl/panel:latest
+      - name: Start Pterodactyl Panel container
+        run: |
+          docker run -d \
+            --name panel \
+            -p 8080:80 \
+            ghcr.io/pterodactyl/panel:latest
 
-    - name: Wait for panel to start
-      timeout-minutes: 3
-      run: |
-        for i in {1..30}; do
-          if docker exec panel ls / >/dev/null 2>&1; then
-            echo "Panel ready"
-            exit 0
-          fi
-          echo "Waiting for panel… ($i)"
-          sleep 3
-        done
-        echo "Panel never became ready"
-        exit 1
-
-    - name: Locate artisan
-      id: find_artisan
-      run: |
-        if docker exec panel test -f /var/www/pterodactyl/artisan; then
-          echo "dir=/var/www/pterodactyl" >> $GITHUB_OUTPUT
-        elif docker exec panel test -f /var/www/html/artisan; then
-          echo "dir=/var/www/html" >> $GITHUB_OUTPUT
-        else
-          echo "Artisan not found"
+      - name: Wait for panel to start
+        timeout-minutes: 3
+        run: |
+          for i in {1..30}; do
+            if docker exec panel ls / >/dev/null 2>&1; then
+              echo "Panel ready"
+              exit 0
+            fi
+            echo "Waiting for panel... ($i)"
+            sleep 3
+          done
+          echo "Panel never became ready"
           exit 1
-        fi
 
-    - name: Create .env safely
-      run: |
-        DIR=${{ steps.find_artisan.outputs.dir }}
+      - name: Locate artisan
+        id: find_artisan
+        run: |
+          if docker exec panel test -f /var/www/pterodactyl/artisan; then
+            echo "dir=/var/www/pterodactyl" >> $GITHUB_OUTPUT
+          elif docker exec panel test -f /var/www/html/artisan; then
+            echo "dir=/var/www/html" >> $GITHUB_OUTPUT
+          else
+            echo "Artisan not found"
+            exit 1
+          fi
 
-        if docker exec panel test -f $DIR/.env.example; then
-          docker exec panel cp $DIR/.env.example $DIR/.env
-        else
-          echo ".env.example missing — generating manually"
-          docker exec panel sh -c "cat > $DIR/.env" <<EOF
+      - name: Create .env safely
+        run: |
+          DIR=${{ steps.find_artisan.outputs.dir }}
+          if docker exec panel test -f $DIR/.env.example; then
+            docker exec panel cp $DIR/.env.example $DIR/.env
+          else
+            echo ".env.example missing — generating manually"
+            docker exec panel sh -c "cat > $DIR/.env" <<EOF
 APP_ENV=production
 APP_DEBUG=false
 APP_URL=http://127.0.0.1:8080
@@ -92,12 +91,12 @@ DB_DATABASE=ptero
 DB_USERNAME=ptero
 DB_PASSWORD=ptero123
 EOF
-        fi
+          fi
 
-    - name: Initialize panel
-      run: |
-        DIR=${{ steps.find_artisan.outputs.dir }}
-        docker exec panel sh -c "cd $DIR && php artisan key:generate --force"
-        docker exec panel sh -c "cd $DIR && php artisan migrate --force"
-        docker exec panel sh -c "cd $DIR && php artisan p:user:make --email=admin@local.com --username=admin --name-first=Admin --password=Admin123"
-        echo "Panel setup done!"
+      - name: Initialize panel
+        run: |
+          DIR=${{ steps.find_artisan.outputs.dir }}
+          docker exec panel sh -c "cd $DIR && php artisan key:generate --force"
+          docker exec panel sh -c "cd $DIR && php artisan migrate --force"
+          docker exec panel sh -c "cd $DIR && php artisan p:user:make --email=admin@local.com --username=admin --name-first=Admin --password=Admin123"
+          echo "Panel setup done!"
