@@ -1,110 +1,294 @@
-name: CloudRDP + Pterodactyl + Tailscale
+name: Pterodactyl Full (Domain HTTPS + XRDP + Tailscale + Eggs + Wings + Auto Node/Server)
 
 on:
   workflow_dispatch:
 
 jobs:
-  rdp:
+  deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      PANEL_DOMAIN: "panelasip.my.id"
+      PANEL_EMAIL: "ashifaja123@gmail.com"
+      PANEL_PORT: "8080"
+      MYSQL_ROOT_PASSWORD: "root123"
+      MYSQL_DATABASE: "ptero"
+      MYSQL_USER: "ptero"
+      MYSQL_PASSWORD: "ptero123"
+      ADMIN_EMAIL: "ashifaja123@gmail.com"
+      ADMIN_PASS: "admin123"
+      XRDP_USER: "rdp"
+      XRDP_PASS: "Admin123"
 
     steps:
-    - name: Update system
-      run: sudo apt update -y
+    - name: Start (visibility)
+      run: echo "Starting Pterodactyl + XRDP + Tailscale deploy (domain HTTPS mode)"
 
-    - name: Install XFCE + XRDP
+    - name: Update & install base packages
       run: |
-        sudo apt install xfce4 xfce4-goodies xrdp -y
-        sudo adduser ubuntu xrdp
-        sudo systemctl enable xrdp
-        sudo systemctl start xrdp
-        echo "ubuntu:Admin123" | sudo chpasswd
+        sudo apt update -y
+        sudo apt upgrade -y
+        sudo DEBIAN_FRONTEND=noninteractive apt install -y \
+          xfce4 xfce4-goodies dbus-x11 xrdp wget curl jq unzip nginx certbot python3-certbot-nginx ufw \
+          software-properties-common
+
+    - name: Create rdp user and configure session
+      run: |
+        sudo useradd -m -s /bin/bash ${XRDP_USER} || true
+        echo "${XRDP_USER}:${XRDP_PASS}" | sudo chpasswd
+        sudo mkdir -p /home/${XRDP_USER}/.config
+        echo "startxfce4" | sudo tee /home/${XRDP_USER}/.xsession >/dev/null
+        sudo chown -R ${XRDP_USER}:${XRDP_USER} /home/${XRDP_USER}
+        sudo usermod -aG sudo ${XRDP_USER} || true
+        sudo adduser ${XRDP_USER} xrdp || true
+        sudo systemctl enable --now xrdp
 
     - name: Install Docker
       run: |
         curl -fsSL https://get.docker.com | sh
-        sudo usermod -aG docker $USER
+        sudo systemctl enable --now docker
+        sudo usermod -aG docker $USER || true
 
-    - name: Create ptero network
+    - name: Create docker network
       run: docker network create ptero-net || true
 
-    - name: Run MariaDB
+    - name: Start MariaDB container
       run: |
-        docker rm -f mariadb || true
-        docker run -d --name mariadb --network ptero-net \
-          -e MARIADB_ROOT_PASSWORD=root \
-          -e MARIADB_DATABASE=panel \
-          -e MARIADB_USER=ptero \
-          -e MARIADB_PASSWORD=ptero \
-          mariadb
+        docker rm -f ptero_mysql || true
+        docker run -d --name ptero_mysql --network ptero-net \
+          -e MARIADB_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD} \
+          -e MARIADB_DATABASE=${MYSQL_DATABASE} \
+          -e MARIADB_USER=${MYSQL_USER} \
+          -e MARIADB_PASSWORD=${MYSQL_PASSWORD} \
+          mariadb:10.6
 
-    - name: Start Panel
+    - name: Start Redis container
+      run: |
+        docker rm -f ptero_redis || true
+        docker run -d --name ptero_redis --network ptero-net redis:7-alpine
+
+    - name: Start Pterodactyl Panel container (internal port)
       run: |
         docker rm -f ptero_panel || true
         docker run -d --name ptero_panel --network ptero-net \
-          -p 8080:80 \
-          ghcr.io/pterodactyl/panel:latest
+          -e PUID=1000 -e PGID=1000 \
+          -p 127.0.0.1:${PANEL_PORT}:80 \
+          ghcr.io/pterodactyl/panel:latest || true
 
-    - name: Wait for Panel filesystem
+    - name: Wait for panel filesystem (artisan) up to ~6 min
+      id: wait_panel
       run: |
-        for i in {1..120}; do
-          if docker exec ptero_panel test -f /var/www/pterodactyl/artisan; then
-            echo "DIR=/var/www/pterodactyl" >> $GITHUB_ENV
+        for i in $(seq 1 120); do
+          if docker exec ptero_panel test -f /var/www/pterodactyl/artisan >/dev/null 2>&1; then
+            echo "dir=/var/www/pterodactyl" >> $GITHUB_OUTPUT
             exit 0
           fi
+          if docker exec ptero_panel test -f /var/www/html/artisan >/dev/null 2>&1; then
+            echo "dir=/var/www/html" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "Waiting for panel filesystem... ($i)"
           sleep 3
         done
+        echo "Panel filesystem (artisan) never appeared" >&2
         exit 1
 
-    - name: Generate .env in panel
+    - name: Configure panel .env (safe: use cp + sed)
       run: |
-        APP_URL="http://dummy.local"
-        docker exec ptero_panel sh -c "echo APP_ENV=production > \$DIR/.env"
-        docker exec ptero_panel sh -c "echo APP_DEBUG=false >> \$DIR/.env"
-        docker exec ptero_panel sh -c "echo APP_URL=\$APP_URL >> \$DIR/.env"
-        docker exec ptero_panel sh -c "echo DB_HOST=mariadb >> \$DIR/.env"
-        docker exec ptero_panel sh -c "echo DB_PORT=3306 >> \$DIR/.env"
-        docker exec ptero_panel sh -c "echo DB_DATABASE=panel >> \$DIR/.env"
-        docker exec ptero_panel sh -c "echo DB_USERNAME=ptero >> \$DIR/.env"
-        docker exec ptero_panel sh -c "echo DB_PASSWORD=ptero >> \$DIR/.env"
+        DIR=${{ steps.wait_panel.outputs.dir }}
+        # if example exists, copy; if not, create minimal .env
+        docker exec ptero_panel sh -c "if [ -f ${DIR}/.env.example ]; then cp ${DIR}/.env.example ${DIR}/.env; fi" || true
+        docker exec ptero_panel sh -c "echo 'APP_URL=http://${PANEL_DOMAIN}' > ${DIR}/.env" || true
+        docker exec ptero_panel sh -c "sed -i \"s/^DB_HOST=.*/DB_HOST=ptero_mysql/\" ${DIR}/.env || true"
+        docker exec ptero_panel sh -c "sed -i \"s/^DB_DATABASE=.*/DB_DATABASE=${MYSQL_DATABASE}/\" ${DIR}/.env || true"
+        docker exec ptero_panel sh -c "sed -i \"s/^DB_USERNAME=.*/DB_USERNAME=${MYSQL_USER}/\" ${DIR}/.env || true"
+        docker exec ptero_panel sh -c "sed -i \"s/^DB_PASSWORD=.*/DB_PASSWORD=${MYSQL_PASSWORD}/\" ${DIR}/.env || true"
+        docker exec ptero_panel sh -c "cat ${DIR}/.env || true"
 
-    - name: Install Panel
+    - name: Wait for MariaDB readiness
       run: |
-        docker exec ptero_panel php /var/www/pterodactyl/artisan migrate --force
-        docker exec ptero_panel php /var/www/pterodactyl/artisan db:seed --force
+        for i in $(seq 1 40); do
+          docker exec ptero_mysql mysql -u root -p${MYSQL_ROOT_PASSWORD} -e "SELECT 1" >/dev/null 2>&1 && { echo "mysql ready"; exit 0; }
+          echo "Waiting for mysql... ($i)"
+          sleep 3
+        done
+        echo "MariaDB never became ready" >&2
+        exit 1
 
-    - name: Create admin user
+    - name: Composer install if needed (best-effort)
       run: |
-        docker exec ptero_panel php /var/www/pterodactyl/artisan p:user:make \
-          --email="ashifaja123@gmail.com" \
-          --username="admin" \
-          --name-first="Admin" \
-          --name-last="User" \
-          --password="admin123" \
-          --admin=1 \
-          --no-interaction
+        DIR=${{ steps.wait_panel.outputs.dir }}
+        docker exec ptero_panel sh -c "cd ${DIR} && composer --version" >/dev/null 2>&1 && \
+          (docker exec ptero_panel sh -c "cd ${DIR} && composer install --no-dev --optimize-autoloader --no-interaction") || true
 
-    - name: Install Wings
+    - name: Generate key, migrate and create admin (best-effort)
       run: |
-        docker run -d --name wings --network ptero-net \
-          --privileged \
-          -v /var/run/docker.sock:/var/run/docker.sock \
-          -p 8081:8080 \
-          ghcr.io/pterodactyl/wings:latest
+        DIR=${{ steps.wait_panel.outputs.dir }}
+        docker exec ptero_panel sh -c "cd ${DIR} && php artisan key:generate --force" || true
+        for i in $(seq 1 30); do
+          docker exec ptero_panel sh -c "cd ${DIR} && php artisan migrate --force" && break || sleep 3
+        done
+        docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:user:make --email='${ADMIN_EMAIL}' --username='admin' --name-first='Admin' --name-last='User' --password='${ADMIN_PASS}' --admin=1" || true
 
-    - name: Install Tailscale
+    - name: Import community eggs (best-effort)
+      run: |
+        TMP=/tmp/eggs_master
+        rm -rf $TMP || true
+        mkdir -p $TMP
+        wget -q -O /tmp/eggs.zip https://github.com/parkervcp/eggs/archive/refs/heads/master.zip || true
+        unzip -qo /tmp/eggs.zip -d $TMP || true
+        # iterate jsons (best-effort)
+        for f in $(find $TMP -name "*.json" 2>/dev/null); do
+          echo "Importing $f"
+          docker cp "$f" ptero_panel:/tmp/ || true
+          docker exec ptero_panel sh -c "php ${DIR}/artisan p:egg:import /tmp/$(basename $f) || true" || true
+        done
+
+    - name: Setup Wings (placeholder + start)
+      run: |
+        mkdir -p /tmp/ptero_wings_config || true
+        # create minimal config file (we'll instruct user to update token in panel)
+        echo "bind_interface: 0.0.0.0" > /tmp/ptero_wings_config/config.yml
+        echo "remote: http://127.0.0.1:${PANEL_PORT}" >> /tmp/ptero_wings_config/config.yml
+        echo "token: REPLACE_WITH_PANEL_DAEMON_TOKEN" >> /tmp/ptero_wings_config/config.yml
+        echo "node_name: runner-node-1" >> /tmp/ptero_wings_config/config.yml
+        docker rm -f ptero_wings || true
+        docker run -d --name ptero_wings --network ptero-net --restart unless-stopped \
+          -v /tmp/ptero_wings_config:/etc/pterodactyl \
+          -p 8081:8081 \
+          ghcr.io/pterodactyl/wings:latest || true
+        echo "Wings started (placeholder config). Update token in /tmp/ptero_wings_config/config.yml if needed."
+
+    - name: Configure Nginx reverse proxy for Panel & enable firewall
+      run: |
+        # create nginx site for panel (listens 80/443, proxy to local 127.0.0.1:PANEL_PORT)
+        SITE_CONF="/etc/nginx/sites-available/pterodactyl_panel"
+        sudo rm -f $SITE_CONF || true
+        sudo bash -c "cat > $SITE_CONF <<'NGCONF'
+server {
+    listen 80;
+    server_name ${PANEL_DOMAIN};
+
+    location / {
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_pass http://127.0.0.1:${PANEL_PORT};
+    }
+}
+NGCONF"
+        sudo ln -sf $SITE_CONF /etc/nginx/sites-enabled/pterodactyl_panel
+        sudo nginx -t || true
+        sudo systemctl restart nginx || true
+        # enable firewall and allow ports
+        sudo apt install -y ufw || true
+        sudo ufw allow OpenSSH || true
+        sudo ufw allow 80/tcp || true
+        sudo ufw allow 443/tcp || true
+        sudo ufw allow 3389/tcp || true
+        sudo ufw --force enable || true
+
+    - name: Obtain Let's Encrypt certificate (Certbot) - requires domain DNS -> IP
+      run: |
+        # Note: Certbot will fail if DNS doesn't point to this runner's public IP.
+        sudo certbot --nginx -d ${PANEL_DOMAIN} --non-interactive --agree-tos -m ${PANEL_EMAIL} || true
+        # reload nginx just in case
+        sudo systemctl reload nginx || true
+
+    - name: Install Tailscale and join network
+      env:
+        TSKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
       run: |
         curl -fsSL https://tailscale.com/install.sh | sh
-        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --ssh
+        sudo tailscale up --authkey="$TSKEY" --accept-routes --ssh --accept-dns=false || true
+        tailscale ip -4 | head -n1 > /tmp/tailscale_ip.txt || true
 
-    - name: Show Tailscale IP + ports
+    - name: Auto-create Node & OpenWA server via Panel API helper (script)
       run: |
-        sleep 6
-        IP=$(tailscale ip -4)
-        echo "================================="
-        echo "     🎉 SYSTEM READY 🎉"
-        echo "================================="
-        echo "Panel  : http://$IP:8080"
-        echo "RDP    : $IP:3389"
-        echo "User   : ubuntu"
-        echo "Pass   : Admin123"
-        echo "================================="
+        cat > /tmp/auto_create_node_server.sh <<'SH'
+#!/bin/bash
+PANEL_URL="$1"
+API_KEY="$2"
+if [ -z "$PANEL_URL" ] || [ -z "$API_KEY" ]; then
+  echo "Usage: $0 <panel_url> <api_key>"
+  exit 1
+fi
+echo "Creating location..."
+LOC_ID=$(curl -s -X POST "$PANEL_URL/api/application/locations" -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" -d '{"short":"auto","long":"Auto Location"}' | jq -r '.attributes.id // 1')
+NODE_PAYLOAD=$(cat <<JSON
+{
+  "name":"auto-node-1",
+  "location_id":${LOC_ID},
+  "fqdn":"127.0.0.1",
+  "scheme":"http",
+  "memory":2048,
+  "memory_overallocate":0,
+  "disk":20000,
+  "disk_overallocate":0,
+  "upload_size":100,
+  "daemon_listen":8081,
+  "daemon_sftp":2022,
+  "daemon_base":"/var/lib/pterodactyl"
+}
+JSON
+)
+curl -s -X POST "$PANEL_URL/api/application/nodes" -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" -d "$NODE_PAYLOAD" | jq || true
+echo "Creating OpenWA server..."
+SERVER_PAYLOAD=$(cat <<JSON
+{
+  "name":"openwa-bot-1",
+  "user":"1",
+  "description":"OpenWA bot",
+  "egg":1,
+  "docker_image":"node:18-alpine",
+  "startup":"npm install && npm start",
+  "environment": {
+    "BOT_TOKEN":""
+  },
+  "allocation": {
+    "default": {
+      "ip":"127.0.0.1",
+      "port":8082
+    }
+  },
+  "limits": {
+    "memory":256,
+    "swap":0,
+    "disk":500,
+    "io":500,
+    "cpu":50
+  }
+}
+JSON
+)
+curl -s -X POST "$PANEL_URL/api/application/servers" -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" -d "$SERVER_PAYLOAD" | jq || true
+echo "done"
+SH
+        chmod +x /tmp/auto_create_node_server.sh || true
+        echo "Helper created at /tmp/auto_create_node_server.sh"
+
+    - name: Print final connection info & notes
+      run: |
+        IP=$(curl -s https://ifconfig.me || true)
+        TS=$(cat /tmp/tailscale_ip.txt 2>/dev/null || tailscale ip -4 | head -n1 || true)
+        echo "============================================"
+        echo "Panel domain : https://${PANEL_DOMAIN}"
+        echo "Panel local  : http://127.0.0.1:${PANEL_PORT}"
+        echo ""
+        echo "If certbot failed, check DNS A record for ${PANEL_DOMAIN} -> this runner's public IP (${IP})"
+        echo ""
+        echo "Tailscale IP : $TS"
+        echo ""
+        echo "XRDP login   : ${XRDP_USER} / ${XRDP_PASS}  (port 3389)"
+        echo ""
+        echo "Panel Admin  : ${ADMIN_EMAIL} / ${ADMIN_PASS}"
+        echo ""
+        echo "Auto-create helper: /tmp/auto_create_node_server.sh"
+        echo "Wings config (local): /tmp/ptero_wings_config/config.yml"
+        echo "============================================"
+
+    - name: Keep runner alive for 6 hours
+      run: |
+        sleep 21600
