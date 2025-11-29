@@ -21,7 +21,7 @@ jobs:
         sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
         sudo systemctl enable docker --now
         docker --version
-        sudo apt install -y curl jq net-tools composer
+        sudo apt install -y curl jq net-tools
 
     - name: Setup Tailscale
       env:
@@ -42,16 +42,14 @@ jobs:
           -p 8080:80 \
           ghcr.io/pterodactyl/panel:latest
 
-    - name: Install Composer dependencies
-      run: |
-        docker exec ptero_panel sh -c "cd /var/www/pterodactyl && composer install --no-dev -o"
-
-    - name: Wait for artisan
+    - name: Wait for artisan (auto detect path)
       id: wait_panel
       run: |
         for i in $(seq 1 200); do
-          if docker exec ptero_panel test -f /var/www/pterodactyl/artisan >/dev/null 2>&1; then
-            echo "dir=/var/www/pterodactyl" >> $GITHUB_OUTPUT
+          ARTISAN_PATH=$(docker exec ptero_panel find / -name artisan 2>/dev/null | head -n 1)
+          if [ ! -z "$ARTISAN_PATH" ]; then
+            DIR=$(dirname $ARTISAN_PATH)
+            echo "dir=$DIR" >> $GITHUB_OUTPUT
             exit 0
           fi
           echo "Waiting ($i)"
@@ -90,11 +88,11 @@ jobs:
 
     - name: Auto SSL
       run: |
-        docker exec ptero_panel sh -c "cd /var/www/pterodactyl && php artisan p:environment:setup"
-        docker exec ptero_panel sh -c "cd /var/www/pterodactyl && php artisan p:environment:mail"
-        docker exec ptero_panel sh -c "cd /var/www/pterodactyl && php artisan p:environment:database"
-        docker exec ptero_panel sh -c "cd /var/www/pterodactyl && php artisan p:environment:queue"
-        docker exec ptero_panel sh -c "cd /var/www/pterodactyl && php artisan p:environment:ssl --email ashifaja123@gmail.com --domain panelasip.my.id"
+        docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:setup"
+        docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:mail"
+        docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:database"
+        docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:queue"
+        docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:ssl --email ashifaja123@gmail.com --domain panelasip.my.id"
 
     - name: Deploy Wings (Tailscale private IP)
       run: |
@@ -150,3 +148,6 @@ jobs:
         echo "LOGIN PASS  : passwordku123"
         echo "TAILSCALE IP: $TSIP"
         echo "AUTO SERVER: panel (NodeJS Bot WA)"
+
+    - name: Keep runner alive for 6 hours
+      run: sleep 6h
