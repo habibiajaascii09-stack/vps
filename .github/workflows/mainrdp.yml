@@ -1,4 +1,4 @@
-name: Ptero-Panel + Wings + Auto NodeJS Server (Tailscale)
+name: Ptero-Panel + Wings + Auto NodeJS Server (Tailscale + MariaDB)
 
 on:
   workflow_dispatch:
@@ -35,6 +35,22 @@ jobs:
     - name: Create Docker network
       run: docker network create ptero-net || true
 
+    - name: Deploy MariaDB
+      run: |
+        docker rm -f pterodb || true
+        docker run -d --name pterodb --network ptero-net \
+          -e MYSQL_ROOT_PASSWORD=rootpassword \
+          -e MYSQL_DATABASE=panel \
+          -e MYSQL_USER=ptero \
+          -e MYSQL_PASSWORD=pass123 \
+          mariadb:10.9
+        # Tunggu DB siap
+        for i in $(seq 1 60); do
+          docker exec pterodb mysqladmin ping -ppass123 &>/dev/null && break
+          echo "Waiting for MariaDB... ($i)"
+          sleep 5
+        done
+
     - name: Deploy Pterodactyl Panel
       run: |
         docker rm -f ptero_panel || true
@@ -66,11 +82,20 @@ jobs:
           -e 's/APP_URL=.*/APP_URL=https:\/\/panelasip.my.id/' \
           -e 's/APP_TIMEZONE=.*/APP_TIMEZONE=Asia\/Jakarta/' \
           -e 's/DB_HOST=.*/DB_HOST=pterodb/' \
+          -e 's/DB_DATABASE=.*/DB_DATABASE=panel/' \
+          -e 's/DB_USERNAME=.*/DB_USERNAME=ptero/' \
+          -e 's/DB_PASSWORD=.*/DB_PASSWORD=pass123/' \
           ${DIR}/.env"
 
     - name: Generate APP_KEY & migrate
       run: |
         DIR=${{ steps.wait_panel.outputs.dir }}
+        # Tunggu DB siap sebelum migrate
+        for i in $(seq 1 60); do
+          docker exec ptero_panel sh -c "php ${DIR}/artisan migrate:status" &>/dev/null && break
+          echo "Waiting for DB connection... ($i)"
+          sleep 5
+        done
         docker exec ptero_panel sh -c "php ${DIR}/artisan key:generate --force"
         docker exec ptero_panel sh -c "php ${DIR}/artisan migrate --force"
 
