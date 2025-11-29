@@ -1,23 +1,43 @@
-- name: Create .env inside panel (safe heredoc)
-  run: |
-    DIR=${{ steps.wait_panel.outputs.dir }}
-    docker exec ptero_panel sh -c "cat > ${DIR}/.env" << 'EOF'
-APP_ENV=production
-APP_ENVIRONMENT_ONLY=false
-APP_DEBUG=false
-APP_URL=http://localhost
+name: RDP + Pterodactyl Full (XRDP + Tailscale + Panel + Wings + NodeJS OpenWA)
 
-DB_CONNECTION=mysql
-DB_HOST=ptero_mysql
-DB_PORT=3306
-DB_DATABASE=pterodb
-DB_USERNAME=pterouser
-DB_PASSWORD=pteropass
+on:
+  workflow_dispatch:
 
-CACHE_DRIVER=redis
-SESSION_DRIVER=redis
-QUEUE_DRIVER=redis
-REDIS_HOST=ptero_redis
-REDIS_PORT=6379
-REDIS_PASSWORD=null
-EOF
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      PANEL_PORT: '8080'
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: ptero
+      MYSQL_USER: ptero
+      MYSQL_PASSWORD: ptero123
+      ADMIN_EMAIL: ashifaja123@gmail.com
+      ADMIN_PASS: admin123
+      XRDP_USER: ubuntu
+      XRDP_PASS: Admin123
+
+    steps:
+    - name: Start (visibility)
+      run: echo "Starting RDP + Pterodactyl workflow"
+
+    - name: Update & install base packages
+      run: |
+        sudo apt update -y
+        sudo apt upgrade -y
+        # desktop + rdp + tools
+        sudo DEBIAN_FRONTEND=noninteractive apt install -y xfce4 xfce4-goodies dbus-x11 xrdp jq wget curl unzip
+        # docker
+        curl -fsSL https://get.docker.com | sh
+        sudo systemctl enable --now docker
+        # ensure user in docker group (best-effort)
+        sudo usermod -aG docker $USER || true
+
+    - name: Create RDP user (ubuntu) and set password
+      run: |
+        sudo useradd -m -s /bin/bash ${XRDP_USER} || true
+        echo "${XRDP_USER}:${XRDP_PASS}" | sudo chpasswd || true
+        sudo usermod -aG sudo ${XRDP_USER} || true
+        # ensure xfce session for xrdp
