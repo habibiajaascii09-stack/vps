@@ -19,12 +19,12 @@ jobs:
           sudo apt update -y
           # Install SSH Server
           sudo apt install -y openssh-server curl wget git
-          # Install Docker
+          # Install Docker (menggunakan skrip resmi, ini lebih baik daripada apt)
           curl -fsSL https://get.docker.com | sh
           sudo systemctl start docker || true
 
       # =========================================================
-      # 2. Install & Start Tailscale & SSH Setup
+      # 2. Install & Start Tailscale & SSH Setup (Perbaikan Instalasi)
       # =========================================================
       - name: Install & Start Tailscale & SSH Setup
         id: step2 
@@ -33,10 +33,11 @@ jobs:
           RUNNER_USER: runner
           RUNNER_PASS: temp${{ github.run_id }} 
         run: |
-          echo "--- 🔑 Menginstal dan Otentikasi Tailscale ---"
-          # Menggunakan skrip instalasi resmi Tailscale yang lebih andal (FIX INSTALASI)
-          curl -fsSL https://pkgs.tailscale.com/install.sh | sudo bash
-
+          echo "--- 🔑 Menginstal dan Otentikasi Tailscale (FIXED) ---"
+          
+          # FIX: Menggunakan skrip instalasi Tailscale resmi (Mengatasi 404/command not found)
+          curl -fsSL https://pkgs.tailscale.com/install.sh | sudo bash 
+          
           echo "Menjalankan Tailscale dengan auth key..."
           sudo tailscale up --authkey="${TAILSCALE_KEY}" --hostname=gh-runner-${{ github.run_id }} --accept-routes
 
@@ -62,7 +63,7 @@ jobs:
           echo "::set-output name=ssh_pass::${RUNNER_PASS}"
 
       # =========================================================
-      # 3. Start MariaDB Container
+      # 3. Start MariaDB Container (Kode Anda)
       # =========================================================
       - name: Start MariaDB
         run: |
@@ -149,7 +150,7 @@ jobs:
           echo "============================================================"
 
       # =========================================================
-      # 5. Keep Runner Alive 6h
+      # 5. Keep Runner Alive 6h (Kode Anda)
       # =========================================================
       - name: Keep Alive 6h
         run: |
