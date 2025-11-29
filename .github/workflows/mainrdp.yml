@@ -3,34 +3,37 @@ name: Pterodactyl Panel Full Setup
 on:
   workflow_dispatch:
     inputs:
-      start:
-        description: "Run Pterodactyl Setup?"
+      confirm:
+        description: "Run full Pterodactyl setup?"
         required: true
         default: "yes"
 
 jobs:
-  build:
+  setup:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
     # ======================================================
-    # 1. Update packages
+    # 1. Update System
     # ======================================================
-    - name: Update
+    - name: Update system
       run: sudo apt update -y
 
     # ======================================================
-    # 2. Install SSH for JuiceSSH login
+    # 2. Install SSH for JuiceSSH Login
     # ======================================================
-    - name: Install SSH Server (JuiceSSH Ready)
+    - name: Install SSH Server
       run: |
         sudo apt install -y openssh-server
         sudo systemctl enable ssh --now
         echo "root:123456" | sudo chpasswd
-        echo "🔐 SSH Login:"
+        echo "============================="
+        echo "SSH Login Ready"
         echo "User: root"
         echo "Pass: 123456"
-        echo "Public IP: $(curl -s ifconfig.me)"
+        echo "IP: $(curl -s ifconfig.me)"
+        echo "============================="
 
     # ======================================================
     # 3. Install Docker
@@ -43,10 +46,115 @@ jobs:
     # ======================================================
     # 4. Install Tailscale
     # ======================================================
-    - name: Install & Start Tailscale
+    - name: Install Tailscale
       run: |
         curl -fsSL https://tailscale.com/install.sh | sh
         sudo tailscale up --ssh --authkey=${{ secrets.TSKEY }} --accept-dns=false
         echo "Tailscale IP:"
         tailscale ip
 
+    # ======================================================
+    # 5. Start MySQL (MariaDB)
+    # ======================================================
+    - name: Start MariaDB
+      run: |
+        docker rm -f mysql || true
+        docker run -d \
+          --name mysql \
+          -e MYSQL_DATABASE=ptero \
+          -e MYSQL_USER=ptero \
+          -e MYSQL_PASSWORD=ptero123 \
+          -e MYSQL_ROOT_PASSWORD=root123 \
+          -p 3306:3306 \
+          mariadb:10.6
+
+    # ======================================================
+    # 6. Start Pterodactyl Panel
+    # ======================================================
+    - name: Start Panel Container
+      run: |
+        docker rm -f panel || true
+        docker run -d \
+          --name panel \
+          --link mysql:db \
+          -p 8080:80 \
+          ghcr.io/pterodactyl/panel:latest
+
+    # ======================================================
+    # 7. Wait for Panel
+    # ======================================================
+    - name: Wait panel filesystem
+      id: ready
+      run: |
+        echo "Waiting for panel filesystem..."
+        for i in {1..60}; do
+          if docker exec panel test -f /var/www/pterodactyl/artisan 2>/dev/null; then
+            echo "dir=/var/www/pterodactyl" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          if docker exec panel test -f /var/www/html/artisan 2>/dev/null; then
+            echo "dir=/var/www/html" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "Wait... ($i)"
+          sleep 3
+        done
+        echo "Filesystem never appeared"
+        exit 1
+
+    # ======================================================
+    # 8. Create .env
+    # ======================================================
+    - name: Generate .env
+      run: |
+        DIR=${{ steps.ready.outputs.dir }}
+        docker exec panel sh -c "cp $DIR/.env.example $DIR/.env || true"
+
+        docker exec panel sh -c "sed -i 's|APP_URL=.*|APP_URL=http://127.0.0.1:8080|' $DIR/.env"
+        docker exec panel sh -c "sed -i 's|DB_HOST=.*|DB_HOST=mysql|' $DIR/.env"
+        docker exec panel sh -c "sed -i 's|DB_DATABASE=.*|DB_DATABASE=ptero|' $DIR/.env"
+        docker exec panel sh -c "sed -i 's|DB_USERNAME=.*|DB_USERNAME=ptero|' $DIR/.env"
+        docker exec panel sh -c "sed -i 's|DB_PASSWORD=.*|DB_PASSWORD=ptero123|' $DIR/.env"
+
+    # ======================================================
+    # 9. Run artisan setup
+    # ======================================================
+    - name: Initialize Pterodactyl
+      run: |
+        DIR=${{ steps.ready.outputs.dir }}
+
+        docker exec panel sh -c "cd $DIR && php artisan key:generate --force"
+        docker exec panel sh -c "cd $DIR && php artisan migrate --force"
+
+        ADMIN_PASS=$(openssl rand -hex 6)
+
+        docker exec panel sh -c "cd $DIR && php artisan p:user:make \
+          --email=admin@local.com \
+          --username=admin \
+          --name-first=Admin \
+          --name-last=User \
+          --password=${ADMIN_PASS} \
+          --admin=1"
+
+        echo "Admin Password: ${ADMIN_PASS}"
+
+    # ======================================================
+    # 10. Show Access Info
+    # ======================================================
+    - name: Show Info
+      run: |
+        echo "===================================="
+        echo "PTERODACTYL PANEL READY"
+        echo "Panel URL: http://$(curl -s ifconfig.me):8080"
+        echo "Admin user: admin"
+        echo "Admin pass printed above"
+        echo "SSH: root / 123456"
+        echo "===================================="
+
+    # ======================================================
+    # 11. Keep alive 6 hours
+    # ======================================================
+    - name: Keep Alive
+      run: |
+        echo "Runner online for 6 hours..."
+        sleep 6h
