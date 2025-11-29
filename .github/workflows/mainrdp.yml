@@ -88,7 +88,7 @@ jobs:
           -e 's|DB_PASSWORD=.*|DB_PASSWORD=pass123|' \
           ${DIR}/.env"
 
-    - name: Wait for DB connection from panel
+    - name: Wait until panel can connect to MariaDB
       run: |
         DIR=${{ steps.wait_panel.outputs.dir }}
         echo "Waiting until panel can connect to MariaDB..."
@@ -103,7 +103,11 @@ jobs:
         DIR=${{ steps.wait_panel.outputs.dir }}
         for cmd in setup mail database queue ssl; do
           for i in $(seq 1 30); do
-            docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:$cmd --email ashifaja123@gmail.com --domain panelasip.my.id" && break
+            if [ "$cmd" = "ssl" ]; then
+              docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:$cmd --email ashifaja123@gmail.com --domain panelasip.my.id" && break
+            else
+              docker exec ptero_panel sh -c "cd ${DIR} && php artisan p:environment:$cmd" && break
+            fi
             echo "Retrying artisan p:environment:$cmd ($i)..."
             sleep 5
           done
