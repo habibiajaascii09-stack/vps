@@ -25,6 +25,7 @@ jobs:
 
     - name: Create RDP user (ubuntu)
       run: |
+        # useradd may exist; ignore error if user exists
         sudo useradd -m -s /bin/bash ubuntu || true
         echo "ubuntu:Admin123" | sudo chpasswd
         sudo usermod -aG sudo ubuntu || true
@@ -42,6 +43,7 @@ jobs:
         curl -fsSL https://tailscale.com/install.sh | sh
         # Try to connect with provided key (may require pre-authorized key)
         sudo tailscale up --authkey="$TSKEY" --accept-routes --ssh --accept-dns=false || true
+        # capture IPv4 (may be empty)
         TSIP=$(tailscale ip -4 | head -n1 || true)
         echo "$TSIP" > /tmp/tailscale_ip.txt || true
 
@@ -72,7 +74,7 @@ jobs:
         docker run -d --name ptero_panel \
           --link ptero_mysql:mysql \
           -p 8080:80 \
-          ghcr.io/pterodactyl/panel:latest
+          ghcr.io/pterodactyl/panel:latest || true
 
     - name: Wait for panel filesystem (artisan) up to ~6 min
       id: wait_panel
@@ -98,6 +100,7 @@ jobs:
         if docker exec ptero_panel test -f $DIR/.env.example >/dev/null 2>&1; then
           docker exec ptero_panel cp $DIR/.env.example $DIR/.env || true
         else
+          # create a minimal .env via heredoc (use single-quoted EOF to avoid expansion)
           docker exec ptero_panel sh -c "cat > $DIR/.env <<'EOF'
 APP_ENV=production
 APP_DEBUG=false
@@ -113,6 +116,7 @@ CACHE_DRIVER=file
 SESSION_DRIVER=file
 EOF"
         fi
+        # enforce DB settings in case .env has different values
         docker exec ptero_panel sh -c "sed -i 's|DB_HOST=.*|DB_HOST=mysql|' $DIR/.env || true"
         docker exec ptero_panel sh -c "sed -i 's|DB_DATABASE=.*|DB_DATABASE=ptero|' $DIR/.env || true"
         docker exec ptero_panel sh -c "sed -i 's|DB_USERNAME=.*|DB_USERNAME=ptero|' $DIR/.env || true"
@@ -121,14 +125,19 @@ EOF"
     - name: Artisan key generate, migrate, create admin
       run: |
         DIR=${{ steps.wait_panel.outputs.dir }}
+        # Generate key (may fail if php/composer missing; tolerate)
         docker exec ptero_panel sh -c "cd $DIR && php artisan key:generate --force" || true
-        # wait for mysql
+
+        # Wait for MariaDB to accept connections (container side)
         for i in $(seq 1 30); do
+          # try migrating; break if success
           docker exec ptero_panel sh -c "cd $DIR && php artisan migrate --force" && break || sleep 3
         done
-        # create admin user
+
+        # create admin user (use provided credentials)
+        ADMIN_EMAIL="ashifaja123@gmail.com"
         ADMIN_PASS="admin123"
-        docker exec ptero_panel sh -c "cd $DIR && php artisan p:user:make --email='ashifaja123@gmail.com' --username='admin' --name-first='Admin' --name-last='User' --password='${ADMIN_PASS}' --admin=1 || true"
+        docker exec ptero_panel sh -c "cd $DIR && php artisan p:user:make --email='${ADMIN_EMAIL}' --username='admin' --name-first='Admin' --name-last='User' --password='${ADMIN_PASS}' --admin=1 || true"
         echo "ADMIN_PASS=${ADMIN_PASS}" > /tmp/ptero_admin.txt || true
 
     - name: Import NodeJS Egg (community)
@@ -160,7 +169,6 @@ EOF
         cat > /tmp/auto_create_node_server.sh <<'SH'
 #!/bin/bash
 # Usage: ./auto_create_node_server.sh <PANEL_URL> <PANEL_API_KEY>
-# Example: ./auto_create_node_server.sh http://127.0.0.1:8080 "your_panel_api_key_here"
 PANEL_URL="$1"
 API_KEY="$2"
 if [ -z "$PANEL_URL" ] || [ -z "$API_KEY" ]; then
@@ -169,14 +177,10 @@ if [ -z "$PANEL_URL" ] || [ -z "$API_KEY" ]; then
 fi
 
 echo "Creating Node via Panel API..."
-# Create a location (if needed) and node (this uses Panel API v1 endpoints)
-# Note: Adjust payloads if your Panel version expects different fields.
-# Create location (optional)
 LOC_ID=$(curl -s -X POST "$PANEL_URL/api/application/locations" \
   -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
   -d '{"short":"auto","long":"Auto Location"}' | jq -r '.attributes.id' 2>/dev/null || echo "")
 
-# Create node
 NODE_PAYLOAD=$(cat <<JSON
 {
   "name":"auto-node-1",
@@ -199,7 +203,6 @@ curl -s -X POST "$PANEL_URL/api/application/nodes" \
   -d "$NODE_PAYLOAD" | jq || true
 
 echo "Creating server (NodeJS OpenWA) via Panel API..."
-# fill server payload as needed; this is a template — adjust environment as necessary
 SERVER_PAYLOAD=$(cat <<JSON
 {
   "name":"openwa-bot-1",
