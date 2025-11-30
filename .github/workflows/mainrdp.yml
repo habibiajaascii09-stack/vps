@@ -1,4 +1,4 @@
-name: deploy
+Name: deploy
 
 on:
   workflow_dispatch:
@@ -15,8 +15,14 @@ jobs:
 
     - name: Install MariaDB, PHP & NGiNX
       run: |
+        # Menginstall NGiNX, MariaDB, dan PHP serta ekstensi yang dibutuhkan
         sudo apt install -y mariadb-server nginx \
         php php-fpm php-cli php-mysql php-gd php-curl php-mbstring php-xml php-zip php-bcmath php-intl
+
+        # Memastikan PHP-FPM berjalan (Ini sering menjadi penyebab error 502 NGiNX)
+        # Menggunakan jalur default socket untuk NGiNX config di bawah
+        sudo systemctl enable php-fpm
+        sudo systemctl start php-fpm
 
     - name: Download Pterodactyl Panel
       run: |
@@ -38,17 +44,23 @@ jobs:
         cp .env.example .env
         php artisan key:generate --force
 
-    - name: MariaDB DB Setup + Migration
+    - name: MariaDB DB Setup + Migration (FIXED)
       run: |
-        sudo mysql -u root -e "CREATE DATABASE IF NOT EXISTS panel;"
-        sudo mysql -u root -e "CREATE USER IF NOT EXISTS 'pterodactyl'@'localhost' IDENTIFIED BY 'Maesaroh123';"
-        sudo mysql -u root -e "GRANT ALL PRIVILEGES ON panel.* TO 'pterodactyl'@'localhost'; FLUSH PRIVILEGES;"
+        # Menggunakan skrip SQL via pipe untuk akses root tanpa password, yang lebih andal di GH Actions
+        sudo mysql <<EOF
+CREATE DATABASE IF NOT EXISTS panel;
+CREATE USER IF NOT EXISTS 'pterodactyl'@'localhost' IDENTIFIED BY 'Maesaroh123';
+GRANT ALL PRIVILEGES ON panel.* TO 'pterodactyl'@'localhost';
+FLUSH PRIVILEGES;
+EOF
 
         cd /var/www/panel
+        # Mengupdate ENV dengan kredensial database
         sed -i "s/DB_DATABASE=.*/DB_DATABASE=panel/" .env
         sed -i "s/DB_USERNAME=.*/DB_USERNAME=pterodactyl/" .env
         sed -i "s/DB_PASSWORD=.*/DB_PASSWORD=Maesaroh123/" .env
 
+        # Menjalankan migrasi
         php artisan migrate --force
 
     - name: Create Admin Account
@@ -61,7 +73,7 @@ jobs:
         sudo chown -R www-data:www-data /var/www/panel
         sudo chmod -R 755 /var/www/panel
 
-    - name: Create NGiNX config
+    - name: Create NGiNX config (Line 67 berada di sini)
       run: |
         CONFIG=$(cat << 'EOF'
 server {
@@ -71,17 +83,21 @@ server {
     server_name _;
 
     location / {
-        try_files $uri $uri/ /index.php?$query_string;
+        try_files \$uri \$uri/ /index.php?\$query_string;
     }
 
     location ~ \.php$ {
         include fastcgi_params;
-        fastcgi_pass unix:/run/php/php-fpm.sock;
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        # Pastikan jalur socket ini sesuai. /run/php/php-fpm.sock adalah jalur default.
+        fastcgi_pass unix:/run/php/php-fpm.sock; 
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
     }
 }
 EOF
 )
+        # Perhatikan: Saya menambahkan backslash (\) sebelum $uri, $query_string, dan $document_root 
+        # di dalam NGiNX config di atas untuk mencegah shell (bash) menginterpretasikannya saat menyimpan ke variabel CONFIG.
+
         echo "$CONFIG" | sudo tee /etc/nginx/sites-available/panel > /dev/null
         sudo ln -sf /etc/nginx/sites-available/panel /etc/nginx/sites-enabled/panel
         sudo rm -f /etc/nginx/sites-enabled/default
