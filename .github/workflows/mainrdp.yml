@@ -58,27 +58,27 @@ jobs:
     - name: Create NGiNX config
       run: |
         sudo tee /etc/nginx/sites-available/panel > /dev/null <<'EOF'
-server {
-    listen 80;
-    root /var/www/panel/public;
-    index index.php;
-    server_name _;
+        server {
+            listen 80;
+            root /var/www/panel/public;
+            index index.php;
+            server_name _;
 
-    location / {
-        try_files $uri $uri/ /index.php?$query_string;
-    }
+            location / {
+                try_files $uri $uri/ /index.php?$query_string;
+            }
 
-    location ~ \.php$ {
-        include fastcgi_params;
-        fastcgi_pass unix:/run/php/php-fpm.sock;
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        fastcgi_index index.php;
-    }
-}
-EOF
+            location ~ \.php$ {
+                include fastcgi_params;
+                fastcgi_pass unix:/run/php/php-fpm.sock;
+                fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+                fastcgi_index index.php;
+            }
+        }
+        EOF
         sudo ln -sf /etc/nginx/sites-available/panel /etc/nginx/sites-enabled/panel
         sudo rm -f /etc/nginx/sites-enabled/default
-        sudo systemctl restart nginx php7.4-fpm || sudo systemctl restart nginx php-fpm || true
+        sudo systemctl restart nginx php-fpm
 
     - name: Install Tailscale
       env:
@@ -103,7 +103,6 @@ EOF
 
     - name: Keep Job Alive (6 Hours)
       run: |
-        # jika memang perlu menjaga runner tetap hidup selama debugging / manual usage:
         for i in {1..21600}; do
           echo "RUNNING — $(date)"
           sleep 1
