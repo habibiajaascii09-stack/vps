@@ -57,7 +57,7 @@ jobs:
 
     - name: Create NGiNX config
       run: |
-        printf "%s\n" \
+        sudo printf "%s\n" \
 "server {" \
 "    listen 80;" \
 "    root /var/www/panel/public;" \
@@ -89,7 +89,7 @@ jobs:
     - name: Show Login Information
       run: |
         echo "==========================================="
-        echo "        PTERODACTYL PANEL DEPLOYED"
+        echo "PTERODACTYL PANEL DEPLOYED"
         echo "==========================================="
         echo "Email      : ashifaja123@gmail.com"
         echo "Username   : ashifaja123"
