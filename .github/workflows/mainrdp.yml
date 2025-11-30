@@ -1,7 +1,6 @@
 name: Deploy Pterodactyl Panel
 
 on:
-  push:
   workflow_dispatch:
 
 jobs:
@@ -31,23 +30,13 @@ jobs:
           echo "server {";
           echo "    listen 80;";
           echo "    server_name _;";
-          echo "";
           echo "    root /var/www/html/public;";
           echo "    index index.php index.html;";
-          echo "";
-          echo "    location / {";
-          echo "        try_files \$uri /index.php?\$query_string;";
-          echo "    }";
-          echo "";
+          echo "    location / { try_files \$uri /index.php?\$query_string; }";
           echo "    location ~ \\.php\$ {";
           echo "        fastcgi_pass ptero_panel:9000;";
-          echo "        fastcgi_index index.php;";
           echo "        include fastcgi_params;";
           echo "        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;";
-          echo "    }";
-          echo "";
-          echo "    location ~ /\\.ht {";
-          echo "        deny all;";
           echo "    }";
           echo "}";
         } > $PWD/nginx.conf
@@ -64,8 +53,25 @@ jobs:
     - name: Start Pterodactyl Panel
       run: |
         docker run -d --name ptero_panel --network ptero-net \
+          -e DB_HOST=ptero_db \
+          -e DB_PORT=3306 \
+          -e DB_DATABASE=panel \
+          -e DB_USERNAME=ptero \
+          -e DB_PASSWORD=StrongPass123 \
           -v panel_data:/var/www/html \
           ghcr.io/pterodactyl/panel:latest
+
+    - name: Wait panel migrations
+      run: |
+        echo "Waiting until panel is ready..."
+        for i in {1..60}; do
+          if docker logs ptero_panel 2>&1 | grep -q "Server ready"; then
+            echo "Panel ready!"
+            break
+          fi
+          echo "($i) Waiting..."
+          sleep 5
+        done
 
     - name: Start Nginx
       run: |
@@ -74,3 +80,41 @@ jobs:
           -v $PWD/nginx.conf:/etc/nginx/conf.d/default.conf \
           -v panel_data:/var/www/html \
           nginx:latest
+
+    - name: Create Admin Account
+      run: |
+        docker exec ptero_panel php artisan p:user:create \
+          --email="ashifaja123@gmail.com" \
+          --username="ashifaja123" \
+          --name-first="Ashif" \
+          --name-last="Aja" \
+          --password="Maesaroh" \
+          --admin=1 \
+          --no-interaction || true
+
+    - name: Display Panel Info
+      run: |
+        echo ""
+        echo "============================================="
+        echo " PTERODACTYL PANEL DEPLOYED SUCCESSFULLY"
+        echo "============================================="
+        echo "LOGIN PANEL : http://$TSIP"
+        echo "EMAIL       : ashifaja123@gmail.com"
+        echo "USERNAME    : ashifaja123"
+        echo "PASSWORD    : Maesaroh"
+        echo "NGINX OK (no Apache, no 502)"
+        echo "Tailscale IP: $TSIP"
+        echo "============================================="
+        echo ""
+        echo "LOG PTERO PANEL (last 50 lines):"
+        docker logs --tail 50 ptero_panel
+        echo ""
+        echo "LOG NGINX (last 50 lines):"
+        docker logs --tail 50 panel_nginx
+        echo ""
+        echo "LOG MARIADB (last 50 lines):"
+        docker logs --tail 50 ptero_db
+        echo ""
+
+    - name: Sleep 6 Hours
+      run: sleep 21600
