@@ -63,7 +63,7 @@ jobs:
 
     - name: Create NGiNX config
       run: |
-        sudo tee /etc/nginx/sites-available/panel > /dev/null <<'EOF'
+        CONFIG=$(cat << 'EOF'
 server {
     listen 80;
     root /var/www/panel/public;
@@ -81,14 +81,18 @@ server {
     }
 }
 EOF
+)
+        echo "$CONFIG" | sudo tee /etc/nginx/sites-available/panel > /dev/null
         sudo ln -sf /etc/nginx/sites-available/panel /etc/nginx/sites-enabled/panel
         sudo rm -f /etc/nginx/sites-enabled/default
         sudo systemctl restart nginx php-fpm
 
     - name: Install Tailscale
+      env:
+        TS_KEY: ${{ secrets.TS_KEY }}
       run: |
         curl -fsSL https://tailscale.com/install.sh | sh
-        sudo tailscale up --authkey=${{ secrets.TS_KEY }} --hostname="pterodactyl"
+        sudo tailscale up --authkey="$TS_KEY" --hostname="pterodactyl"
         echo "TSIP=$(tailscale ip -4 | head -n1)" >> $GITHUB_ENV
 
     - name: Show Login Information
