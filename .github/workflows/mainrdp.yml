@@ -39,8 +39,8 @@ jobs:
 
     - name: MariaDB DB Setup + Migration
       run: |
-        sudo mysql -u root -e "CREATE DATABASE panel;"
-        sudo mysql -u root -e "CREATE USER 'ptero'@'localhost' IDENTIFIED BY 'Maesaroh123';"
+        sudo mysql -u root -e "CREATE DATABASE IF NOT EXISTS panel;"
+        sudo mysql -u root -e "CREATE USER IF NOT EXISTS 'ptero'@'localhost' IDENTIFIED BY 'Maesaroh123';"
         sudo mysql -u root -e "GRANT ALL PRIVILEGES ON panel.* TO 'ptero'@'localhost'; FLUSH PRIVILEGES;"
         cd /var/www/panel
         php artisan migrate --force
@@ -57,33 +57,36 @@ jobs:
 
     - name: Create NGiNX config
       run: |
-        sudo printf "%s\n" \
-"server {" \
-"    listen 80;" \
-"    root /var/www/panel/public;" \
-"    index index.php;" \
-"    server_name _;" \
-"" \
-"    location / {" \
-"        try_files \$uri \$uri/ /index.php?\$query_string;" \
-"    }" \
-"" \
-"    location ~ \.php\$ {" \
-"        include fastcgi_params;" \
-"        fastcgi_pass unix:/run/php/php-fpm.sock;" \
-"        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;" \
-"    }" \
-"}" | sudo tee /etc/nginx/sites-available/panel >/dev/null
+        sudo tee /etc/nginx/sites-available/panel > /dev/null <<'EOF'
+server {
+    listen 80;
+    root /var/www/panel/public;
+    index index.php;
+    server_name _;
 
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        include fastcgi_params;
+        fastcgi_pass unix:/run/php/php-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_index index.php;
+    }
+}
+EOF
         sudo ln -sf /etc/nginx/sites-available/panel /etc/nginx/sites-enabled/panel
         sudo rm -f /etc/nginx/sites-enabled/default
-        sudo systemctl restart nginx php-fpm
+        sudo systemctl restart nginx php7.4-fpm || sudo systemctl restart nginx php-fpm || true
 
     - name: Install Tailscale
+      env:
+        TS_KEY: ${{ secrets.TS_KEY }}
       run: |
         curl -fsSL https://tailscale.com/install.sh | sh
-        sudo tailscale up --authkey=${{ secrets.TS_KEY }} --hostname="pterodactyl"
-        TSIP=$(tailscale ip -4 | head -n1)
+        sudo tailscale up --authkey="$TS_KEY" --hostname="pterodactyl" || true
+        TSIP=$(tailscale ip -4 | head -n1 || true)
         echo "TSIP=$TSIP" >> $GITHUB_ENV
 
     - name: Show Login Information
@@ -100,6 +103,7 @@ jobs:
 
     - name: Keep Job Alive (6 Hours)
       run: |
+        # jika memang perlu menjaga runner tetap hidup selama debugging / manual usage:
         for i in {1..21600}; do
           echo "RUNNING — $(date)"
           sleep 1
