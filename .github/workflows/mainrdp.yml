@@ -1,93 +1,116 @@
-name: deploy
-on: workflow_dispatch
+name: Panel
+
+on:
+  workflow_dispatch:
 
 jobs:
-  run:
+  build:
     runs-on: ubuntu-latest
+
     steps:
+    - name: Update system
+      run: sudo apt update && sudo apt upgrade -y
 
-    - name: Checkout
-      uses: actions/checkout@v3
-
-    - name: Install packages (NO DOCKER CONFLICT)
+    - name: Install dependencies
       run: |
-        sudo apt update
-        sudo apt install -y nginx mysql-server php php-mysql php-cli php-fpm php-zip php-gd php-mbstring php-curl php-bcmath php-json php-xml php-tokenizer php-fileinfo
-        sudo systemctl stop apache2 || true
-
-    - name: Start MySQL
-      run: |
-        sudo systemctl start mysql
-        mysql -u root -e "CREATE DATABASE panel;"
-        mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'root'; FLUSH PRIVILEGES;"
-
-    - name: Start Pterodactyl Panel
-      run: |
-        git clone https://github.com/pterodactyl/panel.git /var/www/panel
-        cd /var/www/panel
-        cp .env.example .env
-        composer install --no-dev --optimize-autoloader
-        php artisan key:generate
-
-    - name: Configure DB in .env
-      run: |
-        sed -i "s/DB_HOST=.*/DB_HOST=127.0.0.1/" /var/www/panel/.env
-        sed -i "s/DB_DATABASE=.*/DB_DATABASE=panel/" /var/www/panel/.env
-        sed -i "s/DB_USERNAME=.*/DB_USERNAME=root/" /var/www/panel/.env
-        sed -i "s/DB_PASSWORD=.*/DB_PASSWORD=root/" /var/www/panel/.env
-
-    - name: Wait DB + migrate
-      run: |
-        cd /var/www/panel
-        for i in {1..20}; do
-          php artisan migrate --seed && break
-          echo "($i) DB not ready..."
-          sleep 3
-        done
-
-    - name: Create Admin Account
-      run: |
-        cd /var/www/panel
-        php artisan p:user:make --email="ashifaja123@gmail.com" --username="ashifaja123" --name-first="Ashif" --name-last="Aja" --password="Maesaroh" --admin=1
-
-    - name: Configure nginx
-      run: |
-        sudo rm -f /etc/nginx/sites-enabled/default
-        sudo bash -c 'echo "
-        server {
-            listen 80;
-            root /var/www/panel/public;
-            index index.php;
-            location / {
-                try_files \$uri \$uri/ /index.php?\$query_string;
-            }
-            location ~ \.php$ {
-                include snippets/fastcgi-php.conf;
-                fastcgi_pass unix:/run/php/php-fpm.sock;
-            }
-        }" > /etc/nginx/sites-available/panel.conf'
-        sudo ln -s /etc/nginx/sites-available/panel.conf /etc/nginx/sites-enabled/panel.conf
-        sudo systemctl restart nginx
+        sudo apt install -y curl wget unzip tar nginx mariadb-server php php-cli php-mysql php-curl php-zip php-mbstring php-xml php-bcmath php-gd php-fpm jq
 
     - name: Setup Tailscale
       env:
         TSKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
       run: |
         curl -fsSL https://tailscale.com/install.sh | sh
-        sudo tailscale up --auth-key "${TSKEY}" --hostname ghpanel --accept-routes
+        sudo tailscale up --auth-key "$TSKEY" --hostname ghpanel --accept-routes
         TSIP=$(tailscale ip -4 | head -n1)
         echo "TSIP=$TSIP" >> $GITHUB_ENV
 
-    - name: Display Panel Info
+    - name: Setup MySQL
       run: |
-        echo " "
-        echo "=================== PANEL DEPLOYED ==================="
-        echo "URL PANEL       : http://$TSIP"
-        echo "ADMIN EMAIL     : ashifaja123@gmail.com"
-        echo "ADMIN USERNAME  : ashifaja123"
-        echo "ADMIN PASSWORD  : Maesaroh"
-        echo "======================================================"
-        echo " "
+        sudo systemctl start mysql
+        sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'root123'; FLUSH PRIVILEGES;"
+        sudo mysql -uroot -proot123 -e "CREATE DATABASE panel;"
 
-    - name: Sleep 6 Hours
-      run: sleep 6h
+    - name: Download Panel
+      run: |
+        cd /var/www
+        sudo rm -rf panel
+        sudo mkdir panel
+        sudo chown $USER:$USER panel
+        cd panel
+        curl -Lo panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
+        tar -xzvf panel.tar.gz
+        cp .env.example .env
+
+    - name: Install Composer
+      run: |
+        cd /var/www/panel
+        curl -sS https://getcomposer.org/installer | php
+        php composer.phar install --no-dev --optimize-autoloader
+
+    - name: Configure .env
+      run: |
+        cd /var/www/panel
+        php artisan key:generate
+        sed -i "s/DB_HOST=.*/DB_HOST=127.0.0.1/" .env
+        sed -i "s/DB_DATABASE=.*/DB_DATABASE=panel/" .env
+        sed -i "s/DB_USERNAME=.*/DB_USERNAME=root/" .env
+        sed -i "s/DB_PASSWORD=.*/DB_PASSWORD=root123/" .env
+
+    - name: Migrate Database
+      run: |
+        cd /var/www/panel
+        sleep 10
+        php artisan migrate --force
+
+    - name: Create Admin Account
+      run: |
+        cd /var/www/panel
+        php artisan p:user:make \
+          --email="ashifaja123@gmail.com" \
+          --username="ashifaja123" \
+          --name="ashifaja123" \
+          --password="Maesaroh" \
+          --admin=1
+
+    - name: Fix Permissions
+      run: |
+        sudo chown -R www-data:www-data /var/www/panel
+        sudo chmod -R 755 /var/www/panel
+
+    - name: Create nginx.conf automatically
+      run: |
+        sudo tee /etc/nginx/sites-available/panel <<EOF
+server {
+    listen 80;
+    server_name _;
+    root /var/www/panel/public;
+    index index.php;
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php8.1-fpm.sock;
+    }
+    location ~* \.(jpg|jpeg|png|gif|ico|css|js)$ {
+        expires max;
+        log_not_found off;
+    }
+}
+EOF
+        sudo ln -sf /etc/nginx/sites-available/panel /etc/nginx/sites-enabled/panel
+        sudo systemctl restart nginx
+
+    - name: Show Panel Info
+      run: |
+        echo "===================================" 
+        echo " PTERODACTYL PANEL SUCCESS RUNNING "
+        echo "===================================" 
+        echo "Tailscale IP Panel: http://${TSIP}"
+        echo "Username: ashifaja123"
+        echo "Password: Maesaroh"
+        echo "Email: ashifaja123@gmail.com"
+        echo "===================================" 
+
+    - name: Sleep 6 hours
+      run: sleep 21600
