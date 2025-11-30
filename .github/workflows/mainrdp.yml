@@ -59,27 +59,22 @@ jobs:
           -e DB_USERNAME=ptero \
           -e DB_PASSWORD=StrongPass123 \
           -v panel_data:/var/www/html \
+          -p 9000:9000 \
           ghcr.io/pterodactyl/panel:latest
 
-    - name: Wait panel migrations
+    - name: Wait DB connection + migrate
       run: |
-        echo "Waiting until panel is ready..."
+        echo "Waiting until panel can connect to DB..."
         for i in {1..60}; do
-          if docker logs ptero_panel 2>&1 | grep -q "Server ready"; then
-            echo "Panel ready!"
-            break
+          if docker exec ptero_panel php artisan migrate --force 2>/dev/null; then
+            echo "Migration DONE!"
+            exit 0
           fi
-          echo "($i) Waiting..."
+          echo "($i) DB not ready..."
           sleep 5
         done
-
-    - name: Start Nginx
-      run: |
-        docker run -d --name panel_nginx --network ptero-net \
-          -p 80:80 \
-          -v $PWD/nginx.conf:/etc/nginx/conf.d/default.conf \
-          -v panel_data:/var/www/html \
-          nginx:latest
+        echo "ERROR: Database never connected"
+        exit 1
 
     - name: Create Admin Account
       run: |
@@ -92,6 +87,14 @@ jobs:
           --admin=1 \
           --no-interaction || true
 
+    - name: Start Nginx
+      run: |
+        docker run -d --name panel_nginx --network ptero-net \
+          -p 80:80 \
+          -v $PWD/nginx.conf:/etc/nginx/conf.d/default.conf \
+          -v panel_data:/var/www/html \
+          nginx:latest
+
     - name: Display Panel Info
       run: |
         echo ""
@@ -102,18 +105,15 @@ jobs:
         echo "EMAIL       : ashifaja123@gmail.com"
         echo "USERNAME    : ashifaja123"
         echo "PASSWORD    : Maesaroh"
-        echo "NGINX OK (no Apache, no 502)"
-        echo "Tailscale IP: $TSIP"
         echo "============================================="
+        echo "LOG PANNEL (last 40 lines):"
+        docker logs --tail 40 ptero_panel || true
         echo ""
-        echo "LOG PTERO PANEL (last 50 lines):"
-        docker logs --tail 50 ptero_panel
+        echo "LOG NGINX (last 40 lines):"
+        docker logs --tail 40 panel_nginx || true
         echo ""
-        echo "LOG NGINX (last 50 lines):"
-        docker logs --tail 50 panel_nginx
-        echo ""
-        echo "LOG MARIADB (last 50 lines):"
-        docker logs --tail 50 ptero_db
+        echo "LOG MARIADB (last 40 lines):"
+        docker logs --tail 40 ptero_db || true
         echo ""
 
     - name: Sleep 6 Hours
