@@ -1,101 +1,77 @@
-name: Panel Runner
+name: PANEL-RDP
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
 
 jobs:
-  run:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Update & Install Dependencies
-      run: |
-        sudo apt update
-        sudo apt install -y nginx mysql-server php-fpm php-mysql php-cli php-gd php-curl php-zip php-mbstring php-xml php-bcmath git unzip curl
+    - name: Update System
+      run: sudo apt update -y && sudo apt upgrade -y
 
-    - name: Start MySQL
+    - name: Setup Tailscale
+      env:
+        TSKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
       run: |
-        sudo systemctl enable mysql
-        sudo systemctl start mysql
-        sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'root'; FLUSH PRIVILEGES;"
+        curl -fsSL https://tailscale.com/install.sh | sh
+        sudo tailscale up --auth-key "${TSKEY}" --hostname ghpanel --accept-routes
+        TSIP=$(tailscale ip -4 | head -n1)
+        echo "TSIP=$TSIP" >> $GITHUB_ENV
 
-    - name: Create Database
+    - name: Install Dependencies
       run: |
-        sudo mysql -uroot -proot -e "CREATE DATABASE panel;"
+        sudo apt install -y nginx php php-fpm php-mysql php-cli unzip curl composer
 
-    - name: Download Pterodactyl
+    - name: Install Pterodactyl Panel
       run: |
-        sudo mkdir -p /var/www/panel
-        cd /var/www/panel
-        sudo curl -Lo panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
-        sudo tar -xzvf panel.tar.gz
-        sudo chmod -R 755 * 
-
-    - name: Install Composer
-      run: |
-        EXPECTED_CHECKSUM="$(curl -s https://composer.github.io/installer.sig)"
-        php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
-        php composer-setup.php --quiet
-        sudo mv composer.phar /usr/bin/composer
-
-    - name: Configure Panel & Migrate
-      run: |
-        cd /var/www/panel
+        cd /var/www
+        sudo git clone https://github.com/pterodactyl/panel panel
+        cd panel
+        sudo composer install --no-dev --optimize-autoloader
         cp .env.example .env
-        sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=root|g" .env
-        sed -i "s|DB_DATABASE=.*|DB_DATABASE=panel|g" .env
-        composer install --no-dev --optimize-autoloader
         php artisan key:generate --force
-        php artisan migrate --force
+        php artisan p:environment:setup -n
+        php artisan p:environment:database -n
+        php artisan p:environment:mail -n
+        php artisan migrate --seed --force
 
     - name: Create Admin Account
       run: |
         cd /var/www/panel
         php artisan p:user:make --email="ashifaja123@gmail.com" --username="ashifaja123" --name-first="Ashif" --name-last="Aja" --password="Maesaroh" --admin=1
 
-    - name: Permissions
+    - name: Fix Permissions
       run: |
         sudo chown -R www-data:www-data /var/www/panel
         sudo chmod -R 755 /var/www/panel
 
     - name: Create nginx config
       run: |
-        printf "%s\n" \
-"server {" \
-"    listen 80;" \
-"    server_name _;" \
-"    root /var/www/panel/public;" \
-"    index index.php;" \
-"    location / {" \
-"        try_files \$uri \$uri/ /index.php?\$query_string;" \
-"    }" \
-"    location ~ \.php$ {" \
-"        include snippets/fastcgi-php.conf;" \
-"        fastcgi_pass unix:/run/php/php8.1-fpm.sock;" \
-"    }" \
-"}" \
-        | sudo tee /etc/nginx/sites-available/panel
+        sudo bash -c 'echo "server {" > /etc/nginx/sites-available/panel'
+        sudo bash -c 'echo "    listen 80;" >> /etc/nginx/sites-available/panel'
+        sudo bash -c 'echo "    server_name $TSIP;" >> /etc/nginx/sites-available/panel'
+        sudo bash -c 'echo "    root /var/www/panel/public;" >> /etc/nginx/sites-available/panel'
+        sudo bash -c 'echo "    index index.php;" >> /etc/nginx/sites-available/panel'
+        sudo bash -c 'echo "    location / { try_files \$uri \$uri/ /index.php?\$query_string; }" >> /etc/nginx/sites-available/panel'
+        sudo bash -c 'echo "    location ~ \.php$ {" >> /etc/nginx/sites-available/panel'
+        sudo bash -c 'echo "        include snippets/fastcgi-php.conf;" >> /etc/nginx/sites-available/panel'
+        sudo bash -c 'echo "        fastcgi_pass unix:/run/php/php8.1-fpm.sock;" >> /etc/nginx/sites-available/panel'
+        sudo bash -c 'echo "    }" >> /etc/nginx/sites-available/panel'
+        sudo bash -c 'echo "}" >> /etc/nginx/sites-available/panel'
         sudo ln -sf /etc/nginx/sites-available/panel /etc/nginx/sites-enabled/panel
         sudo systemctl restart nginx
 
-    - name: Setup Tailscale
-      env:
-        TSKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+    - name: Show Connection Info
       run: |
-        curl -fsSL https://tailscale.com/install.sh | sudo bash
-        sudo tailscale up --auth-key "$TSKEY" --hostname ghpanel --accept-routes
-        TSIP=$(tailscale ip -4 | head -n1)
-        echo "TSIP=$TSIP" >> $GITHUB_ENV
+        echo "====================================="
+        echo " PANEL SUCCESSFULLY INSTALLED"
+        echo " Tailscale IP: http://$TSIP"
+        echo " Login Email   : ashifaja123@gmail.com"
+        echo " Username      : ashifaja123"
+        echo " Password      : Maesaroh"
+        echo "====================================="
 
-    - name: Show Access Information
-      run: |
-        echo "============================="
-        echo " Pterodactyl Panel RUNNING "
-        echo "============================="
-        echo "Tailscale IP (Web Panel): http://$TSIP"
-        echo "Login Email: ashifaja123@gmail.com"
-        echo "Username: ashifaja123"
-        echo "Password: Maesaroh"
-        echo "============================="
-
-    - name: Keep Job Alive
+    - name: Keep Job Alive (6 Hours)
       run: sleep 6h
