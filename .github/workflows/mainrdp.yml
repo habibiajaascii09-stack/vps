@@ -43,8 +43,8 @@ jobs:
 
     - name: DB Setup & Migration
       run: |
-        sudo mysql -u root -e "CREATE DATABASE panel;"
-        sudo mysql -u root -e "CREATE USER 'ptero'@'localhost' IDENTIFIED BY 'Maesaroh123';"
+        sudo mysql -u root -e "CREATE DATABASE IF NOT EXISTS panel;"
+        sudo mysql -u root -e "CREATE USER IF NOT EXISTS 'ptero'@'localhost' IDENTIFIED BY 'Maesaroh123';"
         sudo mysql -u root -e "GRANT ALL PRIVILEGES ON panel.* TO 'ptero'@'localhost'; FLUSH PRIVILEGES;"
         cd /var/www/panel
         php artisan migrate --force
@@ -61,25 +61,33 @@ jobs:
 
     - name: Create NGiNX config
       run: |
-        printf "%s\n" \
-"server {" \
-"    listen 80;" \
-"    root /var/www/panel/public;" \
-"    index index.php;" \
-"    server_name _;" \
-"    location / {" \
-"        try_files \$uri \$uri/ /index.php?\$query_string;" \
-"    }" \
-"    location ~ \.php\$ {" \
-"        include fastcgi_params;" \
-"        fastcgi_pass unix:/run/php/php-fpm.sock;" \
-"        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;" \
-"    }" \
-"}" | sudo tee /etc/nginx/sites-available/panel
+        sudo tee /etc/nginx/sites-available/panel.conf >/dev/null << 'EOF'
+server {
+    listen 80;
+    server_name _;
+    root /var/www/panel/public;
 
-        sudo ln -sf /etc/nginx/sites-available/panel /etc/nginx/sites-enabled/panel
+    index index.php index.html;
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        fastcgi_pass unix:/run/php/php-fpm.sock;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+        fastcgi_param DOCUMENT_ROOT $realpath_root;
+    }
+
+    client_max_body_size 100M;
+}
+EOF
+
+        sudo ln -sf /etc/nginx/sites-available/panel.conf /etc/nginx/sites-enabled/panel.conf
         sudo rm -f /etc/nginx/sites-enabled/default
-        sudo systemctl restart nginx php-fpm
+        sudo systemctl restart nginx php8.2-fpm || sudo systemctl restart nginx php-fpm
 
     - name: Install Tailscale
       run: |
@@ -88,14 +96,16 @@ jobs:
 
     - name: Show Connection Info
       run: |
-        echo "===== PANEL LOGIN DETAILS ====="
-        echo "URL:  http://$(hostname -I | awk '{print $1}')"
+        PANEL_IP=$(hostname -I | awk '{print $1}')
+        TS_IP=$(tailscale ip -4 | head -n1)
+        echo "====================================="
+        echo "       PANEL LOGIN DETAILS           "
+        echo "URL (Local):  http://$PANEL_IP"
+        echo "URL (Tailscale): http://$TS_IP"
         echo "Email: ashifaja123@gmail.com"
         echo "Username: ashifaja123"
         echo "Password: Maesaroh"
-        echo "================================"
-        echo "Tailscale IP:"
-        tailscale ip -4
+        echo "====================================="
 
     - name: Keep Job Alive (6 Hours)
       run: |
