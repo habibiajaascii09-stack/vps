@@ -8,14 +8,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Update & Install Dependencies
+    - name: Update & Install Core Dependencies
       run: |
         sudo apt update -y
         sudo apt install -y software-properties-common curl wget lsb-release ca-certificates
 
-    - name: Install MariaDB, PHP, NGiNX
+    - name: Install MariaDB, PHP & NGiNX
       run: |
-        sudo apt install -y mariadb-server nginx php php-fpm php-cli php-mysql php-gd php-curl php-mbstring php-xml php-zip php-bcmath php-intl php-sodium
+        sudo apt install -y mariadb-server nginx \
+        php php-fpm php-cli php-mysql php-gd php-curl php-mbstring php-xml php-zip php-bcmath php-intl php-sodium
 
     - name: Download Pterodactyl Panel
       run: |
@@ -30,18 +31,13 @@ jobs:
         curl -sS https://getcomposer.org/installer | php
         php composer.phar install --no-dev --optimize-autoloader
 
-    - name: Fix Permissions (before .env)
-      run: |
-        sudo chown -R $USER:$USER /var/www/panel
-        sudo chmod -R 755 /var/www/panel
-
-    - name: Create .env & Generate Key
+    - name: Prepare .env
       run: |
         cd /var/www/panel
         cp .env.example .env
         php artisan key:generate --force
 
-    - name: Database Setup & Migration
+    - name: MariaDB DB Setup + Migration
       run: |
         sudo mysql -u root -e "CREATE DATABASE panel;"
         sudo mysql -u root -e "CREATE USER 'ptero'@'localhost' IDENTIFIED BY 'Maesaroh123';"
@@ -54,7 +50,7 @@ jobs:
         cd /var/www/panel
         php artisan p:user:make --email="ashifaja123@gmail.com" --username="ashifaja123" --name-first="Ashif" --name-last="Aja" --password="Maesaroh" --admin=1
 
-    - name: Fix Permissions (Webserver)
+    - name: Permissions for Webserver
       run: |
         sudo chown -R www-data:www-data /var/www/panel
         sudo chmod -R 755 /var/www/panel
@@ -83,28 +79,26 @@ jobs:
         sudo rm -f /etc/nginx/sites-enabled/default
         sudo systemctl restart nginx php-fpm
 
-    - name: Install & Login Tailscale
-      env:
-        TS_KEY: ${{ secrets.TS_KEY }}
+    - name: Install Tailscale
       run: |
         curl -fsSL https://tailscale.com/install.sh | sh
-        sudo tailscale up --authkey=${TS_KEY} --hostname="pterodactyl"
-        echo "TS_IP=$(tailscale ip -4 | head -n1)" >> $GITHUB_ENV
+        sudo tailscale up --authkey=${{ secrets.TS_KEY }} --hostname="pterodactyl"
+        TSIP=$(tailscale ip -4 | head -n1)
+        echo "TSIP=$TSIP" >> $GITHUB_ENV
 
-    - name: Show Connection Info
+    - name: Show Login Information
       run: |
-        echo "========================================="
-        echo "          PTERODACTYL PANEL INFO"
-        echo "========================================="
-        echo "Tailscale IP (PANEL): http://$TS_IP"
-        echo "Login Email : ashifaja123@gmail.com"
-        echo "Username     : ashifaja123"
-        echo "Password     : Maesaroh"
-        echo "========================================="
-        echo "Jika di browser tidak muncul, coba http://<tailscale-ip>/admin"
-        echo "========================================="
+        echo "==========================================="
+        echo "        PTERODACTYL PANEL DEPLOYED"
+        echo "==========================================="
+        echo "Email      : ashifaja123@gmail.com"
+        echo "Username   : ashifaja123"
+        echo "Password   : Maesaroh"
+        echo "Panel URL  : http://$(hostname -I | awk '{print $1}')"
+        echo "Tailscale  : http://$TSIP"
+        echo "==========================================="
 
-    - name: Keep Container Alive (6 Hours)
+    - name: Keep Job Alive (6 Hours)
       run: |
         for i in {1..21600}; do
           echo "RUNNING — $(date)"
