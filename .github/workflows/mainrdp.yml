@@ -9,100 +9,85 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
 
-    - name: Install packages
+    - name: Install packages (NO DOCKER CONFLICT)
       run: |
         sudo apt update
-        sudo apt install -y docker.io docker-compose nginx
+        sudo apt install -y nginx mysql-server php php-mysql php-cli php-fpm php-zip php-gd php-mbstring php-curl php-bcmath php-json php-xml php-tokenizer php-fileinfo
+        sudo systemctl stop apache2 || true
 
     - name: Start MySQL
       run: |
-        docker run -d --name ptero_db \
-          -e MYSQL_DATABASE=pterodactyl \
-          -e MYSQL_USER=ptero \
-          -e MYSQL_PASSWORD=ptero123 \
-          -e MYSQL_ROOT_PASSWORD=RootPass123 \
-          -p 3306:3306 \
-          mysql:5.7
+        sudo systemctl start mysql
+        mysql -u root -e "CREATE DATABASE panel;"
+        mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'root'; FLUSH PRIVILEGES;"
 
     - name: Start Pterodactyl Panel
       run: |
-        docker run -d --name ptero_panel \
-          --link ptero_db:mysql \
-          -e APP_URL=https://localhost \
-          -e DB_HOST=mysql \
-          -e DB_PORT=3306 \
-          -e DB_DATABASE=pterodactyl \
-          -e DB_USERNAME=ptero \
-          -e DB_PASSWORD=ptero123 \
-          -p 8080:80 \
-          ghcr.io/pterodactyl/panel:latest
+        git clone https://github.com/pterodactyl/panel.git /var/www/panel
+        cd /var/www/panel
+        cp .env.example .env
+        composer install --no-dev --optimize-autoloader
+        php artisan key:generate
 
-    - name: Wait DB + APP KEY + Migration
+    - name: Configure DB in .env
       run: |
-        echo "Waiting DB up..."
-        for i in {1..60}; do
-          if docker exec ptero_db mysqladmin ping -uroot -pRootPass123 --silent; then
-            echo "DB READY!"
-            break
-          fi
+        sed -i "s/DB_HOST=.*/DB_HOST=127.0.0.1/" /var/www/panel/.env
+        sed -i "s/DB_DATABASE=.*/DB_DATABASE=panel/" /var/www/panel/.env
+        sed -i "s/DB_USERNAME=.*/DB_USERNAME=root/" /var/www/panel/.env
+        sed -i "s/DB_PASSWORD=.*/DB_PASSWORD=root/" /var/www/panel/.env
+
+    - name: Wait DB + migrate
+      run: |
+        cd /var/www/panel
+        for i in {1..20}; do
+          php artisan migrate --seed && break
           echo "($i) DB not ready..."
-          sleep 5
+          sleep 3
         done
-
-        echo "Generating APP KEY..."
-        docker exec ptero_panel php artisan key:generate --force
-
-        echo "Running Migration..."
-        docker exec ptero_panel php artisan migrate --force
 
     - name: Create Admin Account
       run: |
-        docker exec ptero_panel php artisan p:user:make \
-          --email="ashifaja123@gmail.com" \
-          --username="ashifaja123" \
-          --name="Ashif Aja" \
-          --password="Maesaroh" \
-          --admin=1
+        cd /var/www/panel
+        php artisan p:user:make --email="ashifaja123@gmail.com" --username="ashifaja123" --name-first="Ashif" --name-last="Aja" --password="Maesaroh" --admin=1
 
-    - name: Create Nginx config (no heredoc)
+    - name: Configure nginx
       run: |
-        sudo mkdir -p /etc/nginx/sites-enabled
+        sudo rm -f /etc/nginx/sites-enabled/default
         sudo bash -c 'echo "
         server {
-            listen 443 ssl;
-            server_name _;
-            root /var/www/pterodactyl/public;
+            listen 80;
+            root /var/www/panel/public;
             index index.php;
-
             location / {
                 try_files \$uri \$uri/ /index.php?\$query_string;
             }
-
             location ~ \.php$ {
-                fastcgi_pass 127.0.0.1:9000;
-                include fastcgi_params;
-                fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
+                include snippets/fastcgi-php.conf;
+                fastcgi_pass unix:/run/php/php-fpm.sock;
             }
-        }" > /etc/nginx/sites-enabled/ptero.conf'
+        }" > /etc/nginx/sites-available/panel.conf'
+        sudo ln -s /etc/nginx/sites-available/panel.conf /etc/nginx/sites-enabled/panel.conf
+        sudo systemctl restart nginx
 
-    - name: Restart Nginx
-      run: sudo systemctl restart nginx
+    - name: Setup Tailscale
+      env:
+        TSKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+      run: |
+        curl -fsSL https://tailscale.com/install.sh | sh
+        sudo tailscale up --auth-key "${TSKEY}" --hostname ghpanel --accept-routes
+        TSIP=$(tailscale ip -4 | head -n1)
+        echo "TSIP=$TSIP" >> $GITHUB_ENV
 
     - name: Display Panel Info
       run: |
-        echo "===================================="
-        echo " PANEL READY!"
-        echo " Email: ashifaja123@gmail.com"
-        echo " Username: ashifaja123"
-        echo " Password: Maesaroh"
-        echo "===================================="
-        echo "Your Tailscale / Web IP:"
-        hostname -I
-        echo "Port: 443 (HTTPS)"
-        echo "===================================="
+        echo " "
+        echo "=================== PANEL DEPLOYED ==================="
+        echo "URL PANEL       : http://$TSIP"
+        echo "ADMIN EMAIL     : ashifaja123@gmail.com"
+        echo "ADMIN USERNAME  : ashifaja123"
+        echo "ADMIN PASSWORD  : Maesaroh"
+        echo "======================================================"
+        echo " "
 
     - name: Sleep 6 Hours
       run: sleep 6h
-
-    - name: Post Checkout
-      run: echo "Job finished."
