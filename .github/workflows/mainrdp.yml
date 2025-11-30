@@ -16,7 +16,7 @@ jobs:
     - name: Install MariaDB, PHP & NGiNX
       run: |
         sudo apt install -y mariadb-server nginx \
-        php php-fpm php-cli php-mysql php-gd php-curl php-mbstring php-xml php-zip php-bcmath php-intl php-sodium
+        php php-fpm php-common php-cli php-mysql php-gd php-curl php-mbstring php-xml php-zip php-bcmath php-intl
 
     - name: Download Pterodactyl Panel
       run: |
@@ -57,7 +57,9 @@ jobs:
 
     - name: Create NGiNX config
       run: |
-        sudo tee /etc/nginx/sites-available/panel > /dev/null <<'EOF'
+        # detect PHP-FPM socket automatically (8.3 / 8.2 / 8.1 / 7.4)
+        PHP_SOCKET=$(ls /run/php/php*-fpm.sock | head -n1)
+        sudo tee /etc/nginx/sites-available/panel > /dev/null <<EOF
         server {
             listen 80;
             root /var/www/panel/public;
@@ -65,20 +67,20 @@ jobs:
             server_name _;
 
             location / {
-                try_files $uri $uri/ /index.php?$query_string;
+                try_files \$uri \$uri/ /index.php?\$query_string;
             }
 
             location ~ \.php$ {
                 include fastcgi_params;
-                fastcgi_pass unix:/run/php/php-fpm.sock;
-                fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+                fastcgi_pass unix:$PHP_SOCKET;
+                fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
                 fastcgi_index index.php;
             }
         }
         EOF
         sudo ln -sf /etc/nginx/sites-available/panel /etc/nginx/sites-enabled/panel
         sudo rm -f /etc/nginx/sites-enabled/default
-        sudo systemctl restart nginx php-fpm
+        sudo systemctl restart nginx
 
     - name: Install Tailscale
       env:
