@@ -27,6 +27,7 @@ jobs:
 
     - name: Composer Install
       run: |
+        sudo chown -R $USER:$USER /var/www/panel
         cd /var/www/panel
         curl -sS https://getcomposer.org/installer | php
         php composer.phar install --no-dev --optimize-autoloader
