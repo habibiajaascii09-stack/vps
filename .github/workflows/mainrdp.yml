@@ -1,6 +1,7 @@
-name: Ptero-Panel + Wings + NodeJS (Stable, No DB, Nginx + PHP-FPM)
+name: Deploy Pterodactyl Panel
 
 on:
+  push:
   workflow_dispatch:
 
 jobs:
@@ -8,11 +9,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Install Docker (stable, no conflicts)
-      run: |
-        curl -fsSL https://get.docker.com | sh
-        sudo systemctl enable docker --now
-        docker --version
+    - name: Checkout
+      uses: actions/checkout@v4
 
     - name: Setup Tailscale
       env:
@@ -29,71 +27,50 @@ jobs:
     - name: Create nginx.conf automatically
       run: |
         mkdir -p $PWD
-        cat > $PWD/nginx.conf <<EOF
-server {
-    listen 80;
-    server_name localhost;
+        {
+          echo "server {";
+          echo "    listen 80;";
+          echo "    server_name _;";
+          echo "";
+          echo "    root /var/www/html/public;";
+          echo "    index index.php index.html;";
+          echo "";
+          echo "    location / {";
+          echo "        try_files \$uri /index.php?\$query_string;";
+          echo "    }";
+          echo "";
+          echo "    location ~ \\.php\$ {";
+          echo "        fastcgi_pass ptero_panel:9000;";
+          echo "        fastcgi_index index.php;";
+          echo "        include fastcgi_params;";
+          echo "        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;";
+          echo "    }";
+          echo "";
+          echo "    location ~ /\\.ht {";
+          echo "        deny all;";
+          echo "    }";
+          echo "}";
+        } > $PWD/nginx.conf
 
-    root /var/www/html/public;
-    index index.php index.html;
-
-    location / {
-        try_files \$uri /index.php?\$query_string;
-    }
-
-    location ~ \.php\$ {
-        fastcgi_pass ptero_panel:9000;
-        fastcgi_index index.php;
-        include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-    }
-
-    location ~ /\.ht {
-        deny all;
-    }
-}
-EOF
-
-    - name: Deploy Pterodactyl Panel (PHP-FPM + Nginx)
+    - name: Start MariaDB
       run: |
-        docker rm -f ptero_panel ptero_nginx || true
+        docker run -d --name ptero_db --network ptero-net \
+          -e MYSQL_DATABASE=panel \
+          -e MYSQL_USER=ptero \
+          -e MYSQL_PASSWORD=StrongPass123 \
+          -e MYSQL_ROOT_PASSWORD=RootPass123 \
+          mariadb:10.6
 
-        # PHP-FPM container
+    - name: Start Pterodactyl Panel
+      run: |
         docker run -d --name ptero_panel --network ptero-net \
-          -v /etc/pterodactyl:/var/www/html \
-          php:8.2-fpm
+          -v panel_data:/var/www/html \
+          ghcr.io/pterodactyl/panel:latest
 
-        # Nginx container
-        docker run -d --name ptero_nginx --network ptero-net \
+    - name: Start Nginx
+      run: |
+        docker run -d --name panel_nginx --network ptero-net \
           -p 80:80 \
-          -v /etc/pterodactyl:/var/www/html:ro \
-          -v $PWD/nginx.conf:/etc/nginx/conf.d/default.conf:ro \
+          -v $PWD/nginx.conf:/etc/nginx/conf.d/default.conf \
+          -v panel_data:/var/www/html \
           nginx:latest
-
-    - name: Deploy Wings
-      run: |
-        docker rm -f wings || true
-        docker run -d --name wings --network ptero-net \
-          -v /var/run/docker.sock:/var/run/docker.sock \
-          -v /etc/pterodactyl:/etc/pterodactyl \
-          ghcr.io/pterodactyl/wings:latest \
-          --config /etc/pterodactyl/config.yml
-
-    - name: Deploy NodeJS Server
-      run: |
-        docker rm -f nodejs || true
-        docker run -d --name nodejs --network ptero-net \
-          -p 3000:3000 \
-          -v $PWD/nodejs:/app \
-          -w /app \
-          node:16 \
-          sh -c "npm install && node server.js"
-
-    - name: Display Access Info
-      run: |
-        echo "Panel: http://localhost"
-        echo "NodeJS Server: http://localhost:3000"
-        echo "TAILSCALE IP: $TSIP"
-
-    - name: Keep runner alive
-      run: sleep 6h
