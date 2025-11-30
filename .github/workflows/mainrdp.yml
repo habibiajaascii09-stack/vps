@@ -1,120 +1,108 @@
-name: Deploy Pterodactyl Panel
-
-on:
-  workflow_dispatch:
+name: deploy
+on: workflow_dispatch
 
 jobs:
-  deploy:
+  run:
     runs-on: ubuntu-latest
-
     steps:
+
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v3
 
-    - name: Setup Tailscale
-      env:
-        TSKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+    - name: Install packages
       run: |
-        curl -fsSL https://tailscale.com/install.sh | sh
-        sudo tailscale up --auth-key "${TSKEY}" --hostname ghpanel --accept-routes
-        TSIP=$(tailscale ip -4 | head -n1)
-        echo "TSIP=$TSIP" >> $GITHUB_ENV
+        sudo apt update
+        sudo apt install -y docker.io docker-compose nginx
 
-    - name: Create Docker network
-      run: docker network create ptero-net || true
-
-    - name: Create nginx.conf automatically
+    - name: Start MySQL
       run: |
-        mkdir -p $PWD
-        {
-          echo "server {";
-          echo "    listen 80;";
-          echo "    server_name _;";
-          echo "    root /var/www/html/public;";
-          echo "    index index.php index.html;";
-          echo "    location / { try_files \$uri /index.php?\$query_string; }";
-          echo "    location ~ \\.php\$ {";
-          echo "        fastcgi_pass ptero_panel:9000;";
-          echo "        include fastcgi_params;";
-          echo "        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;";
-          echo "    }";
-          echo "}";
-        } > $PWD/nginx.conf
-
-    - name: Start MariaDB
-      run: |
-        docker run -d --name ptero_db --network ptero-net \
-          -e MYSQL_DATABASE=panel \
+        docker run -d --name ptero_db \
+          -e MYSQL_DATABASE=pterodactyl \
           -e MYSQL_USER=ptero \
-          -e MYSQL_PASSWORD=StrongPass123 \
+          -e MYSQL_PASSWORD=ptero123 \
           -e MYSQL_ROOT_PASSWORD=RootPass123 \
-          mariadb:10.6
+          -p 3306:3306 \
+          mysql:5.7
 
     - name: Start Pterodactyl Panel
       run: |
-        docker run -d --name ptero_panel --network ptero-net \
-          -e DB_HOST=ptero_db \
+        docker run -d --name ptero_panel \
+          --link ptero_db:mysql \
+          -e APP_URL=https://localhost \
+          -e DB_HOST=mysql \
           -e DB_PORT=3306 \
-          -e DB_DATABASE=panel \
+          -e DB_DATABASE=pterodactyl \
           -e DB_USERNAME=ptero \
-          -e DB_PASSWORD=StrongPass123 \
-          -v panel_data:/var/www/html \
-          -p 9000:9000 \
+          -e DB_PASSWORD=ptero123 \
+          -p 8080:80 \
           ghcr.io/pterodactyl/panel:latest
 
-    - name: Wait DB connection + migrate
+    - name: Wait DB + APP KEY + Migration
       run: |
-        echo "Waiting until panel can connect to DB..."
+        echo "Waiting DB up..."
         for i in {1..60}; do
-          if docker exec ptero_panel php artisan migrate --force 2>/dev/null; then
-            echo "Migration DONE!"
-            exit 0
+          if docker exec ptero_db mysqladmin ping -uroot -pRootPass123 --silent; then
+            echo "DB READY!"
+            break
           fi
           echo "($i) DB not ready..."
           sleep 5
         done
-        echo "ERROR: Database never connected"
-        exit 1
+
+        echo "Generating APP KEY..."
+        docker exec ptero_panel php artisan key:generate --force
+
+        echo "Running Migration..."
+        docker exec ptero_panel php artisan migrate --force
 
     - name: Create Admin Account
       run: |
-        docker exec ptero_panel php artisan p:user:create \
+        docker exec ptero_panel php artisan p:user:make \
           --email="ashifaja123@gmail.com" \
           --username="ashifaja123" \
-          --name-first="Ashif" \
-          --name-last="Aja" \
+          --name="Ashif Aja" \
           --password="Maesaroh" \
-          --admin=1 \
-          --no-interaction || true
+          --admin=1
 
-    - name: Start Nginx
+    - name: Create Nginx config (no heredoc)
       run: |
-        docker run -d --name panel_nginx --network ptero-net \
-          -p 80:80 \
-          -v $PWD/nginx.conf:/etc/nginx/conf.d/default.conf \
-          -v panel_data:/var/www/html \
-          nginx:latest
+        sudo mkdir -p /etc/nginx/sites-enabled
+        sudo bash -c 'echo "
+        server {
+            listen 443 ssl;
+            server_name _;
+            root /var/www/pterodactyl/public;
+            index index.php;
+
+            location / {
+                try_files \$uri \$uri/ /index.php?\$query_string;
+            }
+
+            location ~ \.php$ {
+                fastcgi_pass 127.0.0.1:9000;
+                include fastcgi_params;
+                fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
+            }
+        }" > /etc/nginx/sites-enabled/ptero.conf'
+
+    - name: Restart Nginx
+      run: sudo systemctl restart nginx
 
     - name: Display Panel Info
       run: |
-        echo ""
-        echo "============================================="
-        echo " PTERODACTYL PANEL DEPLOYED SUCCESSFULLY"
-        echo "============================================="
-        echo "LOGIN PANEL : http://$TSIP"
-        echo "EMAIL       : ashifaja123@gmail.com"
-        echo "USERNAME    : ashifaja123"
-        echo "PASSWORD    : Maesaroh"
-        echo "============================================="
-        echo "LOG PANNEL (last 40 lines):"
-        docker logs --tail 40 ptero_panel || true
-        echo ""
-        echo "LOG NGINX (last 40 lines):"
-        docker logs --tail 40 panel_nginx || true
-        echo ""
-        echo "LOG MARIADB (last 40 lines):"
-        docker logs --tail 40 ptero_db || true
-        echo ""
+        echo "===================================="
+        echo " PANEL READY!"
+        echo " Email: ashifaja123@gmail.com"
+        echo " Username: ashifaja123"
+        echo " Password: Maesaroh"
+        echo "===================================="
+        echo "Your Tailscale / Web IP:"
+        hostname -I
+        echo "Port: 443 (HTTPS)"
+        echo "===================================="
 
     - name: Sleep 6 Hours
-      run: sleep 21600
+      run: sleep 6h
+
+    - name: Post Checkout
+      run: echo "Job finished."
